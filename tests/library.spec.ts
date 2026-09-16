@@ -1,0 +1,455 @@
+import { expect, test } from '@playwright/test'
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
+import sharp from 'sharp'
+import { PhotoLibrary } from '../src/main/library'
+import { PreviewProcess } from '../src/main/preview-process'
+import { PreviewEngine } from '../src/main/preview-engine'
+import type { PreviewProcessor } from '../src/main/preview-types'
+
+const photo = resolve('tests/fixtures/photos/alpine-lake.jpg')
+const other = resolve('tests/fixtures/photos/mountain-ridge.jpg')
+
+async function setup(processor?: PreviewProcessor) {
+  const root = await mkdtemp(join(tmpdir(), 'luma-library-'))
+  const engine = new PreviewEngine()
+  const service = new PhotoLibrary(
+    join(root, 'library'),
+    processor ?? engine,
+    () => {},
+    undefined,
+    undefined,
+    new PreviewProcess(resolve('out/main/preview-worker.js')),
+  )
+  await service.open()
+  return {
+    root,
+    service,
+    close: async () => {
+      await service.close()
+      await engine.close()
+      await rm(root, { recursive: true, force: true })
+    },
+  }
+}
+
+async function scan(service: PhotoLibrary, paths: string[], recursive = true) {
+  const id = await service.scan(paths, recursive)
+  await expect.poll(() => service.review(id).phase, { timeout: 30_000 }).toBe('review')
+  return id
+}
+async function commit(service: PhotoLibrary, id: string) {
+  service.importSelected(id)
+  await expect.poll(() => service.review(id).phase).toBe('complete')
+}
+
+test('existing RAW imports load processing metadata lazily and persist independent settings', async () => {
+  const t = await setup()
+  try {
+    const session = await scan(t.service, [resolve('tests/fixtures/sony-zv1.ARW')])
+    await commit(t.service, session)
+    const id = t.service.list().photos[0].id
+    // Model a pre-correction catalog row without reimporting or touching its original.
+    const db = new DatabaseSync(join(t.root, 'library', 'catalog.sqlite'))
+    db.prepare('DELETE FROM processing WHERE id = ?').run(id)
+    db.close()
+    const [a, b] = await Promise.all([t.service.getLensSettings(id), t.service.getLensSettings(id)])
+    expect(a).toEqual(b)
+    expect(a.profile.distortion?.values).toHaveLength(11)
+    expect(a.profile.vignetting?.values).toHaveLength(16)
+    expect(a.revision).toBe(0)
+    await Promise.all([
+      t.service.updateLensSettings(id, 'distortion', false),
+      t.service.updateLensSettings(id, 'vignetting', false),
+    ])
+    expect(await t.service.getLensSettings(id)).toMatchObject({
+      revision: 2,
+      settings: { distortion: false, vignetting: false, chromaticAberration: true },
+    })
+    const staleDb = new DatabaseSync(join(t.root, 'library', 'catalog.sqlite'))
+    const stale = JSON.parse(
+      (staleDb.prepare('SELECT data FROM processing WHERE id = ?').get(id) as { data: string })
+        .data,
+    )
+    stale.metadata.version = 0
+    staleDb.prepare('UPDATE processing SET data = ? WHERE id = ?').run(JSON.stringify(stale), id)
+    staleDb.close()
+    expect(await t.service.getLensSettings(id)).toMatchObject({
+      revision: 2,
+      settings: { distortion: false, vignetting: false, chromaticAberration: true },
+    })
+    await expect(t.service.getLensSettings('../outside')).rejects.toThrow('unavailable')
+    await expect(
+      t.service.updateLensSettings(id, 'distortion', 'yes' as unknown as boolean),
+    ).rejects.toThrow('Invalid')
+    expect(await readFile(join(t.root, 'library', 'originals', id, 'original.arw'))).toEqual(
+      await readFile('tests/fixtures/sony-zv1.ARW'),
+    )
+  } finally {
+    await t.close()
+  }
+})
+
+test('deduplicates by content within a batch and across imports, and preserves same-name files', async () => {
+  const t = await setup()
+  try {
+    await mkdir(join(t.root, 'a'))
+    await mkdir(join(t.root, 'b'))
+    const first = join(t.root, 'a', 'same.jpg')
+    const second = join(t.root, 'b', 'same.jpg')
+    const duplicate = join(t.root, 'renamed.jpg')
+    await copyFile(photo, first)
+    await copyFile(other, second)
+    await copyFile(photo, duplicate)
+    const id = await scan(t.service, [first, second, duplicate])
+    expect(t.service.review(id)).toMatchObject({ ready: 2, duplicates: 1, selected: 2 })
+    await commit(t.service, id)
+    expect(t.service.list().total).toBe(2)
+    const repeated = await scan(t.service, [duplicate])
+    expect(t.service.review(repeated)).toMatchObject({ duplicates: 1, selected: 0 })
+    expect(t.service.review(repeated).candidates[0].message).toBe('Already imported')
+    expect(t.service.list().photos.map((photo) => photo.filename)).toEqual(['same.jpg', 'same.jpg'])
+  } finally {
+    await t.close()
+  }
+})
+
+test('rejects a changed source and missing source without publishing incomplete records', async () => {
+  const t = await setup()
+  try {
+    const source = join(t.root, 'source.jpg')
+    const missing = join(t.root, 'missing.jpg')
+    await copyFile(photo, source)
+    await copyFile(other, missing)
+    const id = await scan(t.service, [source, missing])
+    await copyFile(other, source)
+    await rm(missing)
+    await commit(t.service, id)
+    expect(t.service.review(id)).toMatchObject({ errors: 2, imported: 0 })
+    expect(t.service.review(id).candidates[0].message).toContain('source changed')
+    expect(t.service.list().total).toBe(0)
+    expect(await readdir(join(t.root, 'library', 'originals'))).toEqual([])
+    await t.service.dispose(id)
+    expect(await readdir(join(t.root, 'library', 'staging'))).toEqual([])
+  } finally {
+    await t.close()
+  }
+})
+
+test('reports a staging write failure and leaves the original intact', async () => {
+  const t = await setup()
+  try {
+    const id = await scan(t.service, [photo])
+    const candidate = t.service.review(id).candidates[0]
+    // An existing file blocks the staging directory, simulating a filesystem write failure.
+    await writeFile(join(t.root, 'library', 'staging', id, `copy-${candidate.id}`), 'blocked')
+    await commit(t.service, id)
+    expect(t.service.review(id)).toMatchObject({ errors: 1, imported: 0 })
+    expect(t.service.list().total).toBe(0)
+    expect((await readFile(photo)).length).toBeGreaterThan(0)
+  } finally {
+    await t.close()
+  }
+})
+
+test('cancels scanning, cleans up the session and skips symlink loops and its own library', async () => {
+  const engine = new PreviewEngine()
+  let entered!: () => void
+  const started = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const t = await setup({
+    process: async (_path, _output, signal) => {
+      entered()
+      return new Promise((_resolve, reject) =>
+        signal.addEventListener('abort', () => reject(new Error('Cancelled')), { once: true }),
+      )
+    },
+    close: () => engine.close(),
+  })
+  try {
+    const id = await t.service.scan([photo], true)
+    await started
+    await t.service.cancel(id)
+    expect(t.service.review(id).phase).toBe('cancelled')
+    expect(t.service.list().total).toBe(0)
+    await t.service.dispose(id)
+    const source = join(t.root, 'source')
+    await mkdir(source)
+    await symlink(source, join(source, 'loop'))
+    await symlink(join(t.root, 'library'), join(source, 'library'))
+    const empty = await scan(t.service, [source, join(t.root, 'library')])
+    expect(t.service.review(empty)).toMatchObject({ total: 0, skipped: 2 })
+  } finally {
+    await t.close()
+  }
+})
+
+test('recovers orphan staging and unpublished originals while keeping committed photos', async () => {
+  const t = await setup()
+  try {
+    const id = await scan(t.service, [photo])
+    await commit(t.service, id)
+    const saved = t.service.list().photos[0]
+    await t.service.close()
+    await mkdir(join(t.root, 'library', 'staging', 'interrupted'), { recursive: true })
+    const orphan = 'a'.repeat(64)
+    await mkdir(join(t.root, 'library', 'originals', orphan))
+    const reopened = new PhotoLibrary(join(t.root, 'library'), new PreviewEngine(), () => {})
+    await reopened.open()
+    try {
+      expect(reopened.list().photos).toEqual([saved])
+      expect(await readdir(join(t.root, 'library', 'staging'))).toEqual([])
+      expect(await readdir(join(t.root, 'library', 'originals'))).toEqual([saved.id])
+      const path = reopened.imagePath(saved.previewUrl)
+      expect(path).toBe(join(t.root, 'library', 'originals', saved.id, 'preview.jpg'))
+      for (const url of [
+        'luma-photo://library/../../catalog.sqlite',
+        `luma-photo://library/${saved.id}/original`,
+        'luma-photo://review/no-session/no-candidate/thumb',
+        `luma-photo://library/${orphan}/preview`,
+      ])
+        expect(reopened.imagePath(url)).toBeUndefined()
+    } finally {
+      await reopened.close()
+    }
+  } finally {
+    await t.close()
+  }
+})
+
+test('creates correctly oriented previews for JPEG, PNG and TIFF and rejects corrupt ARW', async () => {
+  const t = await setup()
+  try {
+    const oriented = join(t.root, 'portrait.jpg')
+    const png = join(t.root, 'image.png')
+    const tiff = join(t.root, 'image.tiff')
+    const invalid = join(t.root, 'invalid.ARW')
+    await sharp({ create: { width: 80, height: 40, channels: 3, background: '#bf6525' } })
+      .withMetadata({ orientation: 6 })
+      .jpeg()
+      .toFile(oriented)
+    await sharp(photo).resize(100).png().toFile(png)
+    await sharp(photo).resize(120).tiff().toFile(tiff)
+    await writeFile(invalid, 'invalid raw data')
+    const id = await scan(t.service, [oriented, png, tiff, invalid])
+    expect(t.service.review(id)).toMatchObject({ ready: 3, errors: 1, selected: 3 })
+    await commit(t.service, id)
+    const record = t.service.list().photos.find((photo) => photo.filename === 'portrait.jpg')!
+    expect(record).toMatchObject({ width: 40, height: 80 })
+    const rendered = await sharp(t.service.imagePath(record.previewUrl)).metadata()
+    expect(rendered).toMatchObject({ width: 40, height: 80 })
+    expect(rendered.orientation).toBeUndefined()
+  } finally {
+    await t.close()
+  }
+})
+
+test('decodes the real Sony ZV-1 RAW when embedded preview extraction fails', async () => {
+  test.setTimeout(60_000)
+  const root = await mkdtemp(join(tmpdir(), 'luma-raw-'))
+  const engine = new PreviewEngine(async () => {
+    throw new Error('Embedded preview unavailable')
+  })
+  try {
+    const input = resolve('tests/fixtures/sony-zv1.ARW')
+    const before = createHash('sha256')
+      .update(await readFile(input))
+      .digest('hex')
+    const result = await engine.process(input, root)
+    expect(result.source).toBe('decoded')
+    expect(result.metadata.camera).toBe('ZV-1')
+    expect(result.metadata.width).toBeGreaterThan(5000)
+    expect(result.metadata.height).toBeGreaterThan(3000)
+    const preview = await sharp(join(root, 'preview.jpg')).metadata()
+    expect(preview.width).toBe(2560)
+    const stats = await sharp(join(root, 'preview.jpg')).stats()
+    expect(stats.channels.some((channel) => channel.stdev > 10)).toBe(true)
+    expect(
+      createHash('sha256')
+        .update(await readFile(input))
+        .digest('hex'),
+    ).toBe(before)
+  } finally {
+    await engine.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('cancellation keeps completed imports and prevents a second import from interleaving', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'luma-cancel-'))
+  let committed!: () => void
+  const firstCommitted = new Promise<void>((resolve) => {
+    committed = resolve
+  })
+  const service = new PhotoLibrary(join(root, 'library'), new PreviewEngine(), (event) => {
+    if (event.libraryChanged) committed()
+  })
+  await service.open()
+  try {
+    const id = await scan(service, [photo, other])
+    service.importSelected(id)
+    expect(() => service.importSelected(id)).toThrow('Finish or cancel')
+    await expect(service.scan([photo], true)).rejects.toThrow('Finish or cancel')
+    await firstCommitted
+    await service.cancel(id)
+    expect(service.review(id)).toMatchObject({ phase: 'cancelled', imported: 1 })
+    expect(service.listTasks()[0]).toMatchObject({
+      status: 'cancelled',
+      errorCount: 0,
+      items: { completed: 1, total: 2 },
+    })
+    expect(service.hasActiveTask()).toBe(false)
+    expect(service.list().total).toBe(1)
+    expect(
+      await readFile(
+        join(root, 'library', 'originals', service.list().photos[0].id, 'original.jpg'),
+      ),
+    ).toEqual(await readFile(photo))
+    await service.dispose(id)
+    expect(await readdir(join(root, 'library', 'staging'))).toEqual([])
+  } finally {
+    await service.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('delivers progress for the latest session when sources are replaced quickly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'luma-events-'))
+  const events: string[] = []
+  const service = new PhotoLibrary(join(root, 'library'), new PreviewEngine(), (event) => {
+    if (event.sessionId) events.push(event.sessionId)
+  })
+  await service.open()
+  try {
+    const first = await service.scan([], true)
+    await expect.poll(() => service.review(first).phase, { intervals: [1] }).toBe('review')
+    const second = await service.scan([], true)
+    await expect.poll(() => service.review(second).phase, { intervals: [1] }).toBe('review')
+    await expect.poll(() => events.includes(second)).toBe(true)
+  } finally {
+    await service.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('keeps fixed task totals and paginated errors after staging and review are disposed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'luma-task-errors-'))
+  const processor: PreviewProcessor = {
+    process: async (_path, output) => {
+      await copyFile(photo, join(output, 'thumb.jpg'))
+      await copyFile(photo, join(output, 'preview.jpg'))
+      return { metadata: { width: 1200, height: 800 }, source: 'image' }
+    },
+    close: async () => {},
+  }
+  const service = new PhotoLibrary(
+    join(root, 'library'),
+    processor,
+    () => {},
+    async () => {
+      throw new Error('The card disconnected during copying.')
+    },
+  )
+  await service.open()
+  try {
+    const sources: string[] = []
+    for (let index = 0; index < 61; index++) {
+      const path = join(root, `${index}.jpg`)
+      await writeFile(path, String(index))
+      sources.push(path)
+    }
+    const id = await scan(service, sources)
+    const totalBytes = service.review(id).selectedBytes
+    service.importSelected(id)
+    expect(service.listTasks()[0]).toMatchObject({
+      status: 'running',
+      items: { completed: 0, total: 61 },
+      progress: { completed: 0, total: totalBytes },
+    })
+    expect(() => service.dismissTask(id)).toThrow('Cancel the task')
+    await expect.poll(() => service.listTasks()[0].status).toBe('failed')
+    expect(service.listTasks()[0]).toMatchObject({
+      errorCount: 61,
+      items: { completed: 0, total: 61 },
+      progress: { completed: 0, total: totalBytes },
+    })
+    expect(await readdir(join(root, 'library', 'staging'))).toEqual([])
+    await scan(service, [])
+    expect(service.taskErrors(id).errors).toHaveLength(60)
+    expect(service.taskErrors(id, 60)).toEqual({
+      total: 61,
+      errors: [{ filename: '60.jpg', message: 'The card disconnected during copying.' }],
+    })
+    const snapshot = service.listTasks()
+    snapshot[0].items!.total = 0
+    expect(service.listTasks()[0].items!.total).toBe(61)
+    expect(() => service.taskErrors(id, -1)).toThrow('Invalid page offset')
+    service.dismissTask(id)
+    expect(service.listTasks()).toEqual([])
+    expect(() => service.taskErrors(id)).toThrow('dismissed')
+  } finally {
+    await service.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('locates the selected photo and its neighbors after new imports move it to another page', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'luma-navigation-'))
+  const processor: PreviewProcessor = {
+    process: async (_path, output) => {
+      await copyFile(photo, join(output, 'thumb.jpg'))
+      await copyFile(photo, join(output, 'preview.jpg'))
+      return { metadata: { width: 1200, height: 800 }, source: 'image' }
+    },
+    close: async () => {},
+  }
+  const service = new PhotoLibrary(join(root, 'library'), processor, () => {})
+  await service.open()
+  try {
+    const id = await scan(service, [photo])
+    await commit(service, id)
+    const selected = service.list().photos[0].id
+    const sources: string[] = []
+    for (let index = 0; index < 60; index++) {
+      const path = join(root, `${index}.jpg`)
+      await writeFile(path, String(index))
+      sources.push(path)
+    }
+    await commit(service, await scan(service, sources))
+    expect(service.locate(selected)).toMatchObject({
+      index: 60,
+      offset: 60,
+      total: 61,
+      photos: [{ id: selected }],
+    })
+    expect(service.locate(selected, 1)).toBeNull()
+    const previous = service.locate(selected, -1)!
+    expect(previous).toMatchObject({ index: 59, offset: 0, total: 61 })
+    expect(previous.photos[59].filename).toBe('0.jpg')
+    const newest = previous.photos[0].id
+    const range = service.range(newest, selected)
+    expect(range).toHaveLength(61)
+    expect(service.range(selected, newest)).toEqual(range)
+    expect(range[60].id).toBe(selected)
+    expect(service.range('f'.repeat(64), selected)).toEqual([
+      { id: selected, filename: 'alpine-lake.jpg' },
+    ])
+    expect(service.locate(previous.photos[59].id, 1)?.photos[0].id).toBe(selected)
+  } finally {
+    await service.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})

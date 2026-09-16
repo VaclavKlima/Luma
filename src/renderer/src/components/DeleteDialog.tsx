@@ -1,0 +1,79 @@
+import { useEffect, useRef, useState } from 'react'
+import type { PhotoReference } from '../../../shared/contracts'
+import styles from './PhotoActions.module.css'
+
+export function DeleteDialog({
+  photos,
+  onClose,
+  onStarted,
+}: {
+  photos: PhotoReference[]
+  onClose: () => void
+  onStarted: () => void
+}) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  const cancel = useRef<HTMLButtonElement>(null)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    dialog.current?.showModal()
+    cancel.current?.focus()
+  }, [])
+  function close() {
+    if (!pending) {
+      dialog.current?.close()
+      onClose()
+    }
+  }
+  async function confirm() {
+    if (pending) return
+    setPending(true)
+    try {
+      await window.luma.deletePhotos(photos.map((photo) => photo.id))
+      dialog.current?.close()
+      onStarted()
+    } catch (error) {
+      setError(String(error))
+      setPending(false)
+    }
+  }
+  return (
+    <dialog
+      ref={dialog}
+      className={styles.dialog}
+      aria-labelledby="delete-title"
+      aria-describedby="delete-description"
+      onCancel={(event) => {
+        event.preventDefault()
+        close()
+      }}
+    >
+      <h2 id="delete-title">
+        {photos.length === 1 ? 'Delete photo?' : `Delete ${photos.length} photos?`}
+      </h2>
+      <p id="delete-description">
+        Luma’s internal copies will move to system Trash. Your source files and SD card will stay
+        untouched.
+      </p>
+      <ul>
+        {photos.slice(0, 5).map((photo) => (
+          <li key={photo.id}>{photo.filename}</li>
+        ))}
+      </ul>
+      {photos.length > 5 && <p>And {photos.length - 5} more photos.</p>}
+      {error && (
+        <p role="alert" className={styles.error}>
+          {error}
+        </p>
+      )}
+      <footer>
+        <button ref={cancel} disabled={pending} onClick={close}>
+          Cancel
+        </button>
+        <button className={styles.destructive} disabled={pending} onClick={() => void confirm()}>
+          {pending ? 'Starting…' : 'Move to Trash'}
+        </button>
+      </footer>
+    </dialog>
+  )
+}

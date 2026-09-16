@@ -1,0 +1,183 @@
+import type { ProcessingMetadata, ProcessingOptions } from '../shared/lens'
+import { fork, type ChildProcess } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import type {
+  FullPreviewProcessor,
+  FullPreviewResult,
+  PreviewProcessor,
+  PreviewResult,
+} from './preview-types'
+
+export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
+  private child?: ChildProcess
+  private busy = false
+  private idle?: ReturnType<typeof setTimeout>
+
+  constructor(
+    private workerPath = join(import.meta.dirname, 'preview-worker.js'),
+    private timeoutMs = 90_000,
+  ) {}
+
+  private launch(): ChildProcess {
+    const require = createRequire(import.meta.url)
+    const platform = process.platform === 'win32' ? 'win' : process.platform
+    const runtimePackage = require.resolve(`node-${platform}-${process.arch}/package.json`)
+    const executable = join(
+      dirname(runtimePackage),
+      'bin',
+      process.platform === 'win32' ? 'node.exe' : 'node',
+    )
+    // Native libvips conflicts with Electron's exported GLib symbols on Linux.
+    // A bundled Node binary keeps native decoding independent of Electron.
+    const env = { ...process.env }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.NODE_OPTIONS
+    const child = fork(this.workerPath, [], {
+      execPath: executable.replace('app.asar/', 'app.asar.unpacked/'),
+      execArgv: [],
+      env,
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    })
+    child.stdout?.resume()
+    child.once('exit', () => {
+      if (this.child === child) this.child = undefined
+    })
+    return child
+  }
+
+  async process(path: string, output: string, signal: AbortSignal): Promise<PreviewResult> {
+    return this.run<PreviewResult>('process', path, output, signal)
+  }
+
+  async inspect(path: string, signal: AbortSignal): Promise<ProcessingMetadata> {
+    try {
+      return await this.run<ProcessingMetadata>('metadata', path, '', signal)
+    } finally {
+      await this.close()
+    }
+  }
+
+  async renderFull(
+    path: string,
+    output: string,
+    signal: AbortSignal,
+    options?: ProcessingOptions,
+  ): Promise<FullPreviewResult> {
+    const result = await this.run<FullPreviewResult>('full', path, output, signal, options).catch(
+      async (error) => {
+        await this.close(true)
+        throw error
+      },
+    )
+    // Preserve GPU shader compilation across nearby requests. CPU RAW processing has a
+    // much larger WASM high-water mark; reclaim that process after its completed render.
+    if (
+      result.diagnostics?.backend !== 'gpu' &&
+      !Object.values(result.appliedCorrections ?? {}).some(Boolean)
+    )
+      await this.close(true)
+    else {
+      this.idle = setTimeout(() => {
+        void this.close()
+      }, 30_000)
+      this.idle.unref()
+    }
+    if (process.env.LUMA_PREVIEW_DIAGNOSTICS) console.info('Full preview', result.diagnostics)
+    return result
+  }
+
+  releaseFrame(): void {
+    if (!this.busy && this.child?.connected) this.child.send({ type: 'release' }, () => {})
+  }
+
+  private async run<T>(
+    mode: 'process' | 'full' | 'metadata',
+    path: string,
+    output: string,
+    signal: AbortSignal,
+    options?: ProcessingOptions,
+  ): Promise<T> {
+    signal.throwIfAborted()
+    clearTimeout(this.idle)
+    if (this.busy) throw new Error('The preview worker is busy.')
+    this.busy = true
+    let child: ChildProcess | undefined
+    let diagnostics = ''
+    const diagnostic = (chunk: Buffer) => {
+      diagnostics = (diagnostics + chunk.toString()).slice(-4000)
+    }
+    try {
+      child = this.child ??= this.launch()
+      const worker = child
+      worker.stderr?.on('data', diagnostic)
+      return await new Promise<T>((resolve, reject) => {
+        const cleanup = () => {
+          clearTimeout(timer)
+          worker.off('message', message)
+          worker.off('exit', exited)
+          worker.off('error', failed)
+          signal.removeEventListener('abort', aborted)
+        }
+        const failed = (error: Error) => {
+          cleanup()
+          reject(error)
+        }
+        const message = (value: { type?: string; stage?: string; result?: T; error?: string }) => {
+          if (value.type === 'stage') {
+            if (process.env.LUMA_PREVIEW_DIAGNOSTICS) console.info('Preview stage', value.stage)
+            return
+          }
+          cleanup()
+          if (value.result) resolve(value.result)
+          else reject(new Error(value.error ?? 'Preview generation failed.'))
+        }
+        const exited = (code: number | null) => {
+          cleanup()
+          if (diagnostics) console.warn('Preview worker exited:', code, diagnostics)
+          reject(new Error('The preview worker stopped. Try again.'))
+        }
+        const aborted = () => {
+          cleanup()
+          void this.close(mode === 'full').finally(() => {
+            reject(new Error('Preview generation cancelled.'))
+          })
+        }
+        const timer = setTimeout(() => {
+          cleanup()
+          void this.close(mode === 'full').finally(() => {
+            reject(new Error('Preview generation timed out.'))
+          })
+        }, this.timeoutMs)
+        worker.on('message', message)
+        worker.once('exit', exited)
+        worker.once('error', failed)
+        signal.addEventListener('abort', aborted, { once: true })
+        worker.send({ type: mode, path, output, options }, (error) => {
+          if (error) failed(error)
+        })
+      })
+    } finally {
+      child?.stderr?.off('data', diagnostic)
+      this.busy = false
+    }
+  }
+
+  async close(force = false): Promise<void> {
+    clearTimeout(this.idle)
+    const child = this.child
+    if (!child) return
+    this.child = undefined
+    if (child.exitCode !== null || child.signalCode !== null) return
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => child.kill('SIGKILL'), 2000)
+      child.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      if (force) child.kill('SIGKILL')
+      else if (child.connected) child.send({ type: 'close' }, () => {})
+      else child.kill()
+    })
+  }
+}

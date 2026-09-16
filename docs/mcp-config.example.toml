@@ -1,0 +1,8 @@
+# Merge this table into the trusted project's .codex/config.toml.
+# Replace cwd with the absolute path to your Luma checkout.
+[mcp_servers.luma_ui]
+command = "npm"
+args = ["run", "--silent", "mcp:ui"]
+cwd = "/absolute/path/to/Luma"
+startup_timeout_sec = 30
+tool_timeout_sec = 60

@@ -1,0 +1,69 @@
+{
+  "name": "luma",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local photo library and editor with an AI console.",
+  "type": "module",
+  "main": "out/main/index.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "setup:electron": "install-electron",
+    "dev": "electron-vite dev",
+    "dev:mcp": "node scripts/dev-mcp.mjs",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "npm run build && playwright test",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:e2e",
+    "mcp:ui": "playwright-mcp --cdp-endpoint=http://127.0.0.1:9222 --caps=vision --output-dir=artifacts/mcp",
+    "mcp:check": "node scripts/check-mcp.mjs",
+    "mcp:test": "npm run build && node scripts/check-mcp.mjs --isolated",
+    "gpu:check": "node scripts/check-gpu.mjs",
+    "benchmark:preview": "npm run build && node scripts/benchmark-preview.mjs"
+  },
+  "dependencies": {
+    "@colorhythm/libraw-wasm": "^1.1.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "exiftool-vendored": "^38.0.1",
+    "lucide-react": "1.46.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "sharp": "^0.35.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@playwright/mcp": "0.0.81",
+    "@playwright/test": "1.63.0",
+    "@types/node": "^24.13.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "44.3.0",
+    "electron-vite": "5.0.0",
+    "eslint": "10.10.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.12.0",
+    "prettier": "3.9.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "8.70.0",
+    "vite": "^7.0.0"
+  },
+  "optionalDependencies": {
+    "node-darwin-arm64": "npm:node-bin-darwin-arm64@24.20.0",
+    "node-darwin-x64": "24.20.0",
+    "node-linux-arm64": "24.20.0",
+    "node-linux-x64": "24.20.0",
+    "node-win-arm64": "24.20.0",
+    "node-win-x64": "24.20.0",
+    "webgpu": "^0.6.1"
+  }
+}

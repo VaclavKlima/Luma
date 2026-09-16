@@ -1,0 +1,131 @@
+.preview {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: clip;
+  isolation: isolate;
+  touch-action: none;
+  overscroll-behavior: contain;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pannable {
+  cursor: grab;
+}
+.dragging {
+  cursor: grabbing;
+}
+.image {
+  object-fit: contain;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: block;
+  max-width: none;
+  max-height: none;
+  transform-origin: center;
+  user-select: none;
+}
+.placeholder {
+  filter: blur(8px);
+  pointer-events: none;
+}
+.resolution {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 190px;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+.resolution button {
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  font-size: inherit;
+}
+.viewport:focus-within {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
+}
+.image:focus-visible {
+  outline: none;
+}
+.message {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.message button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 10px;
+}
+.toolbar {
+  gap: 8px;
+}
+.zoomControls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.zoomControls button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 28px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #b9b9b1;
+}
+.zoomControls button:hover:enabled {
+  background: var(--accent-surface);
+}
+.zoomControls select {
+  width: 76px;
+  height: 26px;
+  border: 1px solid #41413c;
+  border-radius: 4px;
+  background: #242424;
+  color: #c7c7bf;
+  padding: 0 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.zoomControls :disabled {
+  opacity: 0.4;
+}
+@media (max-width: 1199px) {
+  .toolbar {
+    padding: 0 10px;
+  }
+  .zoomControls {
+    gap: 1px;
+  }
+  .zoomControls select {
+    width: 67px;
+  }
+}

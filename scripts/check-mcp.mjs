@@ -1,0 +1,413 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createServer } from 'node:net'
+import { _electron as electron } from '@playwright/test'
+import { fileURLToPath } from 'node:url'
+import { setTimeout as delay } from 'node:timers/promises'
+
+const root = fileURLToPath(new URL('..', import.meta.url))
+const output = new URL('../artifacts/mcp/', import.meta.url)
+let endpoint = 'http://127.0.0.1:9222'
+const isolated = process.argv.includes('--isolated')
+let desktop
+let profile
+const transcript = []
+
+async function waitForLuma() {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      const response = await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(1000) })
+      if (response.ok) {
+        const targets = await response.json()
+        if (targets.some((target) => target.type === 'page' && target.title === 'Luma')) return
+      }
+    } catch {
+      // The Electron window may still be starting.
+    }
+    await delay(250)
+  }
+  throw new Error('No Luma window is available on port 9222. Start npm run dev:mcp first.')
+}
+
+function contentText(result) {
+  return (result.content ?? [])
+    .filter((item) => item.type === 'text')
+    .map((item) => item.text)
+    .join('\n')
+}
+
+function buttonRef(snapshot, name) {
+  const line = snapshot.split('\n').find((line) => line.includes(`button "${name}"`))
+  const ref = line?.match(/\[ref=([^\]]+)\]/)?.[1]
+  if (!ref) throw new Error(`The accessibility snapshot did not include the ${name} button.`)
+  return ref
+}
+
+const client = new Client({ name: 'luma-mcp-smoke', version: '0.1.0' })
+let transport
+try {
+  if (isolated) {
+    const probe = createServer()
+    await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve))
+    const port = probe.address().port
+    await new Promise((resolve) => probe.close(resolve))
+    endpoint = `http://127.0.0.1:${port}`
+    profile = await mkdtemp(join(tmpdir(), 'luma-mcp-'))
+    const env = { ...process.env }
+    delete env.ELECTRON_RENDERER_URL
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.FORCE_COLOR
+    desktop = await electron.launch({
+      args: [root, `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`],
+      env,
+      chromiumSandbox: true,
+    })
+    await desktop.firstWindow()
+    await desktop.evaluate(({ dialog }, root) => {
+      dialog.showOpenDialog = async () => ({
+        canceled: false,
+        filePaths: [
+          `${root}/tests/fixtures/photos/alpine-lake.jpg`,
+          `${root}/tests/fixtures/photos/mountain-ridge.jpg`,
+        ],
+      })
+    }, root)
+    await desktop.evaluate(({ ipcMain }) => {
+      const original = ipcMain._invokeHandlers.get('preview:request')
+      const pending = new Promise((resolve) => {
+        globalThis.releaseFullPreviewForMcp = resolve
+      })
+      ipcMain.removeHandler('preview:request')
+      ipcMain.handle('preview:request', async (...args) => {
+        await pending
+        return original(...args)
+      })
+    })
+  }
+  await waitForLuma()
+  await mkdir(output, { recursive: true })
+  transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [
+      fileURLToPath(new URL('../node_modules/@playwright/mcp/cli.js', import.meta.url)),
+      `--cdp-endpoint=${endpoint}`,
+      '--caps=vision',
+      '--output-dir=artifacts/mcp',
+    ],
+    cwd: root,
+    stderr: 'pipe',
+  })
+  transport.stderr?.on('data', (chunk) => process.stderr.write(chunk))
+  await client.connect(transport)
+  const { tools } = await client.listTools()
+  for (const required of [
+    'browser_snapshot',
+    'browser_click',
+    'browser_evaluate',
+    'browser_take_screenshot',
+  ]) {
+    if (!tools.some((tool) => tool.name === required))
+      throw new Error(`Missing MCP tool: ${required}`)
+  }
+  console.log(`Connected to Playwright MCP; discovered ${tools.length} tools.`)
+
+  async function call(name, args = {}) {
+    const result = await client.callTool({ name, arguments: args })
+    const text = contentText(result)
+    transcript.push({ tool: name, text })
+    if (result.isError) throw new Error(`${name}: ${text}`)
+    return { result, text }
+  }
+
+  // The app owns one renderer window. Confirm its title before any UI action.
+  const initial = await call('browser_snapshot')
+  if (!initial.text.includes('Luma')) throw new Error('The connected renderer is not Luma.')
+  async function clickButton(name) {
+    const snapshot = await call('browser_snapshot')
+    await call('browser_click', { element: name, target: buttonRef(snapshot.text, name) })
+  }
+  async function waitForText(text) {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const snapshot = await call('browser_snapshot')
+      if (snapshot.text.includes(text)) return snapshot
+      await delay(250)
+    }
+    throw new Error(`MCP never observed: ${text}`)
+  }
+  if (isolated) {
+    await clickButton('Import photos')
+    await clickButton('Choose photos')
+    await waitForText('Ready to import')
+    await desktop.evaluate(() => {
+      const fs = process.getBuiltinModule('fs')
+      const { Readable } = process.getBuiltinModule('stream')
+      const { setTimeout: delay } = process.getBuiltinModule('timers/promises')
+      const original = fs.createReadStream
+      fs.createReadStream = (path, options) => {
+        const source = original(path, { ...options, highWaterMark: 4096 })
+        return Readable.from(
+          (async function* () {
+            try {
+              for await (const chunk of source) {
+                await delay(40, undefined, { signal: options?.signal })
+                yield chunk
+              }
+            } finally {
+              source.destroy()
+            }
+          })(),
+        )
+      }
+      process.getBuiltinModule('module').syncBuiltinESMExports()
+      // Duplicate review later should scan at normal speed.
+      globalThis.restoreCopyStream = () => {
+        fs.createReadStream = original
+        process.getBuiltinModule('module').syncBuiltinESMExports()
+      }
+    })
+    await clickButton('Import 2 photos')
+    const running = await waitForText('progressbar "Importing photos"')
+    if (running.text.includes('dialog "Import photos"'))
+      throw new Error('Import review did not close.')
+    await clickButton('Import photos')
+    await waitForText('Cancel task')
+    const progressScreenshot = await call('browser_take_screenshot', {
+      type: 'png',
+      filename: 'artifacts/mcp/background-import.png',
+    })
+    const progressImage = progressScreenshot.result.content?.find((item) => item.type === 'image')
+    if (progressImage)
+      await writeFile(
+        new URL('background-import.png', output),
+        Buffer.from(progressImage.data, 'base64'),
+      )
+    await waitForText('Import complete')
+    await desktop.evaluate(() => {
+      globalThis.restoreCopyStream()
+      delete globalThis.restoreCopyStream
+    })
+    await clickButton('Close task details')
+    await clickButton('Select mountain-ridge.jpg')
+    await waitForText('Loading full resolution…')
+    await call('browser_evaluate', {
+      function: `() => {
+        const viewport = document.querySelector('[data-testid="preview-viewport"]');
+        if (viewport.dataset.resolution !== 'loading' || viewport.querySelector('img'))
+          throw new Error('Expected a neutral loader without a camera JPEG');
+        return {resolution: viewport.dataset.resolution};
+      }`,
+    })
+    await desktop.evaluate(() => {
+      globalThis.releaseFullPreviewForMcp()
+      delete globalThis.releaseFullPreviewForMcp
+    })
+    await waitForText('Full resolution')
+    // Exercise zoom and a real pointer drag through MCP's coordinate tools.
+    await call('browser_click', { target: '[data-testid="main-preview"]' })
+    await call('browser_press_key', { key: '1' })
+    const center = await call('browser_evaluate', {
+      function: `() => {
+        const viewport = document.querySelector('[data-testid="preview-viewport"]');
+        if (Number(viewport.dataset.scale) !== 1) throw new Error('Native zoom was not applied');
+        const box = viewport.getBoundingClientRect();
+        return {x: box.x + box.width / 2, y: box.y + box.height / 2};
+      }`,
+    })
+    const point = JSON.parse(center.text.split('### Result\n')[1].split('\n###')[0])
+    await call('browser_mouse_drag_xy', {
+      startX: point.x,
+      startY: point.y,
+      endX: point.x - 70,
+      endY: point.y - 40,
+    })
+    await call('browser_evaluate', {
+      function: `() => {
+        const viewport = document.querySelector('[data-testid="preview-viewport"]');
+        if (Math.abs(Number(viewport.dataset.panX) + 70) > 1 || Math.abs(Number(viewport.dataset.panY) + 40) > 1)
+          throw new Error('Pointer drag did not pan the preview');
+        return {scale: viewport.dataset.scale, x: viewport.dataset.panX, y: viewport.dataset.panY};
+      }`,
+    })
+    await call('browser_mouse_wheel', { deltaX: 0, deltaY: -100 })
+    await call('browser_evaluate', {
+      function: `() => {
+        const viewport = document.querySelector('[data-testid="preview-viewport"]');
+        if (Number(viewport.dataset.scale) <= 1) throw new Error('Wheel zoom was not applied');
+        return {scale: viewport.dataset.scale};
+      }`,
+    })
+    await call('browser_evaluate', {
+      function: `() => {
+        const viewport = document.querySelector('[data-testid="preview-viewport"]');
+        const image = document.querySelector('[data-testid="main-preview"]');
+        const scale = Number(viewport.dataset.scale);
+        if (viewport.dataset.resolution !== 'full' || !image.dataset.src.includes('/full/'))
+          throw new Error('Full resolution was not displayed');
+        if (scale <= 1 || Math.abs(image.getBoundingClientRect().width / scale - image.width) > 1)
+          throw new Error('Full-resolution zoom did not preserve native pixel dimensions');
+        return {resolution: viewport.dataset.resolution, width: image.width, height: image.height, scale};
+      }`,
+    })
+    const zoomScreenshot = await call('browser_take_screenshot', {
+      type: 'png',
+      filename: 'artifacts/mcp/preview-zoom.png',
+    })
+    const zoomImage = zoomScreenshot.result.content?.find((item) => item.type === 'image')
+    if (zoomImage)
+      await writeFile(new URL('preview-zoom.png', output), Buffer.from(zoomImage.data, 'base64'))
+    await clickButton('Fit preview')
+    await call('browser_evaluate', {
+      function: `() => {
+        const viewport = document.querySelector('[data-testid="preview-viewport"]');
+        if (viewport.dataset.mode !== 'fit' || Number(viewport.dataset.panX) || Number(viewport.dataset.panY))
+          throw new Error('Fit did not reset the preview');
+        return {mode: viewport.dataset.mode};
+      }`,
+    })
+    // Reopening the same files exercises duplicate detection through MCP too.
+    await clickButton('Import photos')
+    await clickButton('Choose photos')
+    await waitForText('Already imported')
+    await clickButton('Cancel')
+    // Exercise the renderer selection and confirmation through MCP, with isolated Trash.
+    await desktop.evaluate(({ app, shell }) => {
+      const fs = process.getBuiltinModule('fs')
+      const path = process.getBuiltinModule('path')
+      const trash = path.join(app.getPath('userData'), 'test-trash')
+      fs.mkdirSync(trash, { recursive: true })
+      shell.trashItem = async (source) => {
+        await fs.promises.rename(source, path.join(trash, path.basename(source)))
+      }
+    })
+    await clickButton('Select mountain-ridge.jpg')
+    const selectionSnapshot = await call('browser_snapshot')
+    await call('browser_click', {
+      element: 'Select alpine-lake.jpg with Shift',
+      target: buttonRef(selectionSnapshot.text, 'Select alpine-lake.jpg'),
+      modifiers: ['Shift'],
+    })
+    await waitForText('2 selected')
+    await call('browser_press_key', { key: 'Delete' })
+    await waitForText('Delete 2 photos?')
+    await clickButton('Move to Trash')
+    await waitForText('Your photographs, at home.')
+    const deleted = await call('browser_evaluate', {
+      function: 'async () => ({total: (await window.luma.listPhotos()).total})',
+    })
+    if (!/"total":\s*0/.test(deleted.text))
+      throw new Error('The confirmed selection was not deleted.')
+    // A real RAW exercises the independent lens controls through the same MCP connection.
+    await desktop.evaluate(({ dialog }, root) => {
+      dialog.showOpenDialog = async () => ({
+        canceled: false,
+        filePaths: [`${root}/tests/fixtures/sony-zv1.ARW`],
+      })
+    }, root)
+    await clickButton('Import photos')
+    await clickButton('Choose photos')
+    await waitForText('Ready to import')
+    await clickButton('Import 1 photos')
+    await waitForText('Lens corrections')
+    await call('browser_evaluate', {
+      function: `async () => {
+      for (let i=0;i<120;i++) {
+        if(document.querySelector('[data-testid="preview-viewport"]')?.dataset.resolution === 'full') return true;
+        await new Promise(r=>setTimeout(r,250));
+      }
+      throw new Error('Corrected RAW did not reach the canvas');
+    }`,
+    })
+    const lensSnapshot = await call('browser_snapshot')
+    const lensLine = lensSnapshot.text
+      .split('\n')
+      .find((line) => line.includes('checkbox "Distortion"'))
+    const lensRef = lensLine?.match(/\[ref=([^\]]+)\]/)?.[1]
+    if (!lensRef) throw new Error('MCP did not expose the distortion checkbox')
+    await call('browser_click', { element: 'Distortion correction', target: lensRef })
+    await call('browser_evaluate', {
+      function: `async () => {
+      const id = (await window.luma.listPhotos()).photos[0].id;
+      for(let i=0;i<120;i++) {
+        const state=await window.luma.getLensSettings(id);
+        if(state.revision===1 && !state.settings.distortion && document.querySelector('[data-testid="preview-viewport"]')?.dataset.resolution==='full') return state;
+        await new Promise(r=>setTimeout(r,250));
+      }
+      throw new Error('Lens toggle did not persist and render');
+    }`,
+    })
+    // Reload the existing Electron document; MCP intentionally disallows file-URL navigation.
+    await (await desktop.firstWindow()).reload({ waitUntil: 'domcontentloaded' })
+    await waitForText('Lens corrections')
+    await call('browser_evaluate', {
+      function: `async () => {
+      const id=(await window.luma.listPhotos()).photos[0].id;
+      const state=await window.luma.getLensSettings(id);
+      if(state.settings.distortion || state.revision!==1) throw new Error('Lens settings did not survive reload');
+      return state;
+    }`,
+    })
+    await call('browser_take_screenshot', {
+      type: 'png',
+      filename: 'artifacts/mcp/lens-corrections.png',
+    })
+    await clickButton('Select sony-zv1.ARW')
+    await call('browser_press_key', { key: 'Delete' })
+    await waitForText('Delete photo?')
+    await clickButton('Move to Trash')
+    await waitForText('Your photographs, at home.')
+  } else {
+    const photoButton = initial.text.match(/button "(Select [^"]+)"/)
+    if (photoButton) await clickButton(photoButton[1])
+    else {
+      await clickButton('Import photos')
+      await clickButton('Cancel')
+    }
+  }
+  const state = await call('browser_evaluate', {
+    function: `() => ({ consoleOpen: document.querySelector('[data-testid="console-toggle"]').getAttribute('aria-expanded') })`,
+  })
+  if (
+    !state.text.includes('"consoleOpen": "true"') &&
+    !state.text.includes('"consoleOpen":"true"')
+  ) {
+    const current = await call('browser_snapshot')
+    await call('browser_click', {
+      element: 'Console toggle in the status bar',
+      target: buttonRef(current.text, 'Console'),
+    })
+  }
+  const final = await call('browser_snapshot')
+  if (!/disconnected/i.test(final.text))
+    throw new Error('The disconnected console was not visible.')
+  const screenshot = await call('browser_take_screenshot', {
+    type: 'png',
+    filename: 'artifacts/mcp/workspace.png',
+  })
+  const inlineImage = screenshot.result.content?.find((item) => item.type === 'image')
+  if (inlineImage)
+    await writeFile(new URL('workspace.png', output), Buffer.from(inlineImage.data, 'base64'))
+  await writeFile(
+    new URL('protocol-check.json', output),
+    JSON.stringify(transcript, null, 2) + '\n',
+  )
+  console.log(
+    `Passed: MCP discovery, snapshot, ${isolated ? 'background import, progress details, consistent full-resolution previews, persistent RAW lens controls, zoom, pointer drag, Fit reset, duplicate detection, multiple selection, confirmed deletion' : 'library interaction'}, console, and screenshot.`,
+  )
+  console.log('Artifacts: artifacts/mcp/workspace.png and artifacts/mcp/protocol-check.json')
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error)
+  process.exitCode = 1
+} finally {
+  await client.close().catch(() => undefined)
+  await transport?.close().catch(() => undefined)
+  await desktop
+    ?.evaluate(({ dialog }) => {
+      dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
+    })
+    .catch(() => undefined)
+  await desktop?.close().catch(() => undefined)
+  if (profile) await rm(profile, { recursive: true, force: true })
+}

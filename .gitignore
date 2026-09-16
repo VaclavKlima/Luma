@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+artifacts/
+test-results/
+playwright-report/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+.codex/config.toml

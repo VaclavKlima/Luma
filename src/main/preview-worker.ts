@@ -1,0 +1,47 @@
+import { PreviewEngine } from './preview-engine'
+import type { PreviewWorkerRequest, PreviewWorkerResponse } from './preview-types'
+
+function send(message: PreviewWorkerResponse) {
+  if (process.connected) process.send?.(message)
+}
+
+const engine = new PreviewEngine()
+let closing = false
+async function close() {
+  if (closing) return
+  closing = true
+  await engine.close()
+  process.exit(0)
+}
+process.on('disconnect', () => {
+  void close()
+})
+process.on('SIGTERM', () => {
+  void close()
+})
+process.on('message', async (data: PreviewWorkerRequest) => {
+  if (data.type === 'release') {
+    engine.releaseFrame()
+    return
+  }
+  if (data.type === 'close') {
+    await close()
+    return
+  }
+  try {
+    const result =
+      data.type === 'metadata'
+        ? await engine.inspect(data.path)
+        : data.type === 'full'
+          ? await engine.renderFull(
+              data.path,
+              data.output,
+              (stage) => send({ type: 'stage', stage }),
+              data.options,
+            )
+          : await engine.process(data.path, data.output)
+    send({ type: 'result', result })
+  } catch (error) {
+    send({ type: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+})
