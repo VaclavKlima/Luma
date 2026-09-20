@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test'
+import { randomUUID } from 'node:crypto'
 import {
-  mkdtemp,
-  mkdir,
   copyFile,
+  mkdir,
+  mkdtemp,
   readFile,
   readdir,
   rename,
@@ -12,7 +13,6 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { randomUUID } from 'node:crypto'
 import { PhotoLibrary } from '../src/main/library'
 import type { PreviewProcessor } from '../src/main/preview-types'
 
@@ -219,7 +219,7 @@ test('migrates v1 and reconciles interrupted removals without erasing OS-restore
       )
       const check = new DatabaseSync(join(library, 'catalog.sqlite'))
       expect(check.prepare('SELECT * FROM removals').all()).toEqual([])
-      expect(check.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 3 })
+      expect(check.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 8 })
       check.close()
     } finally {
       await recovered.close()

@@ -1,0 +1,39 @@
+.content {
+  padding: 6px 14px 12px;
+}
+.heading,
+.indicators {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.plot {
+  display: block;
+  width: 100%;
+  height: 96px;
+  background: #141414;
+  margin: 8px 0;
+}
+.plot:focus-visible {
+  outline: 1px solid #aaa;
+  outline-offset: 2px;
+}
+.readout {
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  min-height: 24px;
+}
+.indicators button {
+  font-size: 10px;
+  padding: 4px 6px;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  background: transparent;
+  color: #bdbdbd;
+}
+.indicators button[aria-pressed='true'] {
+  background: #444;
+  color: #fff;
+}

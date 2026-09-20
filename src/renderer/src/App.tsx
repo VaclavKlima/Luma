@@ -1,3 +1,5 @@
+import { usePreviewTools } from './hooks/usePreviewTools'
+import { useEdits } from './hooks/useEdits'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Aperture,
@@ -52,6 +54,9 @@ export function App() {
     changePage,
     getSelection,
   } = library
+  const edits = useEdits(photo?.id)
+  const previewTools = usePreviewTools(photo?.id)
+  const [interactivePhoto, setInteractivePhoto] = useState<string | null>(null)
   const [deleteTargets, setDeleteTargets] = useState<PhotoReference[] | null>(null)
   const [contextMenu, setContextMenu] = useState<{
     x: number
@@ -62,6 +67,8 @@ export function App() {
   const restoreFocus = useCallback(() => {
     const origin = actionOrigin.current
     if (origin?.isConnected) origin.focus()
+    else if (origin?.dataset.testid === 'main-preview')
+      document.querySelector<HTMLElement>('[data-testid="main-preview"]')?.focus()
     else document.querySelector<HTMLElement>('[data-testid="photo-library"]')?.focus()
   }, [])
   const closeContextMenu = useCallback(
@@ -236,17 +243,49 @@ export function App() {
               <span className={styles.sdrBadge}>SDR</span>
             </div>
             <div className={styles.previewActions}>
-              <button className={styles.iconButton} disabled aria-label="Undo">
+              <button
+                className={styles.iconButton}
+                disabled={edits.saving || !edits.state?.canUndo}
+                onClick={() => void edits.history('undo')}
+                aria-label="Undo"
+                title="Undo photo edit (Ctrl/Cmd+Z)"
+              >
                 <Undo2 size={15} />
               </button>
-              <button className={styles.iconButton} disabled aria-label="Redo">
+              <button
+                className={styles.iconButton}
+                disabled={edits.saving || !edits.state?.canRedo}
+                onClick={() => void edits.history('redo')}
+                aria-label="Redo"
+                title="Redo photo edit (Ctrl/Cmd+Shift+Z)"
+              >
                 <Redo2 size={15} />
               </button>
               <span className={styles.toolbarDivider} />
               <button className={styles.iconButton} disabled aria-label="Crop photo">
                 <Crop size={15} />
               </button>
-              <button className={styles.iconButton} disabled aria-label="Compare before and after">
+              <button
+                className={`${styles.iconButton} ${styles.beforeButton}`}
+                disabled={!photo || interactivePhoto !== photo.id}
+                aria-pressed={previewTools.mode === 'before'}
+                onClick={() =>
+                  previewTools.update({ mode: previewTools.mode === 'before' ? 'after' : 'before' })
+                }
+                title="Before (\)"
+              >
+                Before
+              </button>
+              <button
+                className={styles.iconButton}
+                disabled={!photo || interactivePhoto !== photo.id}
+                aria-label="Compare before and after"
+                aria-pressed={previewTools.mode === 'split'}
+                onClick={() =>
+                  previewTools.update({ mode: previewTools.mode === 'split' ? 'after' : 'split' })
+                }
+                title="Split (Y)"
+              >
                 <Columns2 size={15} />
               </button>
             </div>
@@ -257,9 +296,18 @@ export function App() {
               {error}
             </p>
           )}
+          {edits.error && (
+            <p role="alert" className={styles.errorBanner}>
+              {edits.error}
+            </p>
+          )}
           <PhotoPreview
             key={photo?.id ?? 'empty'}
             photo={photo}
+            adjustments={edits.adjustments}
+            tools={previewTools}
+            gesturing={edits.gesturing}
+            onEditingReady={setInteractivePhoto}
             total={total}
             position={position}
             onNavigate={navigate}
@@ -277,7 +325,12 @@ export function App() {
           )}
         </main>
 
-        <Inspector photo={photo} />
+        <Inspector
+          tools={previewTools}
+          photo={photo}
+          edits={edits}
+          previewReady={!!photo && interactivePhoto === photo.id}
+        />
       </div>
 
       <footer className={styles.statusBar}>

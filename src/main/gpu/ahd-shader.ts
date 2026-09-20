@@ -1,7 +1,21 @@
+import {
+  exposureModule,
+  contrastModule,
+  highlightsModule,
+  shadowsModule,
+  whitesModule,
+  blacksModule,
+} from '../../shared/adjustments'
 // AHD stages adapted from LibRaw 0.22.1 (CDDL-1.0).
 // Copyright 2019-2025 LibRaw LLC; dcraw portions Copyright 1997-2018 Dave Coffin.
 // See third_party/libraw/ for license, attribution, and the upstream source reference.
 export const ahdShader = /* wgsl */ `
+${exposureModule.wgsl}
+${contrastModule.wgsl}
+${highlightsModule.wgsl}
+${shadowsModule.wgsl}
+${whitesModule.wgsl}
+${blacksModule.wgsl}
 struct Params {
   size: vec4u, // active width, height, stored width, flip
   crop: vec4u, // left, top, stripe start, stripe rows
@@ -9,6 +23,9 @@ struct Params {
   scale: vec4f,
   camera: array<vec4f, 3>,
   xyz: array<vec4f, 3>,
+  adjustments: vec4f, // exposure, contrast, neutral display white, highlights
+  tonalEndpoints: vec4f, // shadows, whites, blacks, custom white balance
+  wb0: vec4f, wb1: vec4f, wb2: vec4f,
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> raw: array<u32>;
@@ -126,7 +143,9 @@ fn border(q:vec2i) -> vec3i {
 }
 @compute @workgroup_size(16, 16) fn display(@builtin(global_invocation_id) id: vec3u) {
   if(any(id.xy>=p.size.xy)) { return; }
-  let rgb=vec3u(clamp(textureLoad(linearInput,vec2i(id.xy),0).xyz*65535.0,vec3f(0),vec3f(65535)));
+  var input=textureLoad(linearInput,vec2i(id.xy),0).xyz;
+  if(p.tonalEndpoints.w != 0.0) { input=vec3f(dot(p.wb0.xyz,input),dot(p.wb1.xyz,input),dot(p.wb2.xyz,input)); }
+  let rgb=vec3u(clamp(applyBlacks(applyWhites(applyShadows(applyHighlights(applyContrast(applyExposure(input,p.adjustments.x),p.adjustments.y,p.adjustments.z),p.adjustments.w,p.adjustments.z),p.tonalEndpoints.x,p.adjustments.z),p.tonalEndpoints.y,p.adjustments.z),p.tonalEndpoints.z,p.adjustments.z)*65535.0,vec3f(0),vec3f(65535)));
   var q=id.xy; var width=p.size.x;
   if ((p.size.w & 1u)!=0u) { q.x=p.size.x-1u-q.x; }
   if ((p.size.w & 2u)!=0u) { q.y=p.size.y-1u-q.y; }

@@ -1,12 +1,19 @@
+import { whiteBalanceMatrix, identityMatrix } from '../../shared/white-balance'
+import {
+  neutralAdjustments,
+  type AdjustmentParameters,
+  type WorkingFrame,
+} from '../../shared/adjustments'
 // AHD Lab conversion adapted from LibRaw 0.22.1 under CDDL-1.0. See third_party/libraw.
 import { lensShader } from './lens-shader'
 import type { CorrectionPlan } from '../processing/lens-correction'
 import { ahdShader } from './ahd-shader'
-import { displayCurve, type RawSource } from './raw-source'
+import { displayCurve, displayTransform, type RawSource } from './raw-source'
 import { frameByteLength } from '../../shared/preview-frame'
 
 export const GPU_RENDER_ID = 'bayer-ahd-srgb-gpu-2'
 export interface GpuFrame {
+  working?: WorkingFrame
   data: Buffer
   width: number
   height: number
@@ -23,6 +30,8 @@ export class RawGpuRenderer {
   private linear?: GPUTexture
   private cameraSource?: RawSource
   private adapter = ''
+  private histogram?: Uint32Array
+  private correctedMode = false
 
   get failure(): string | undefined {
     return this.unavailable
@@ -97,7 +106,12 @@ export class RawGpuRenderer {
     this.gpu = undefined
   }
 
-  async render(source: RawSource, correction?: CorrectionPlan): Promise<GpuFrame> {
+  async render(
+    source: RawSource,
+    correction?: CorrectionPlan,
+    adjustments: AdjustmentParameters = neutralAdjustments,
+    exportLinear = false,
+  ): Promise<GpuFrame> {
     const start = performance.now()
     const device = await this.initialize().catch((error) => {
       this.unavailable = error instanceof Error ? error.message : String(error)
@@ -112,6 +126,7 @@ export class RawGpuRenderer {
     const estimatedBytes = Math.max(
       bytes * 6 + source.pixels.byteLength + stripePixels * 80,
       correction ? bytes * 9 + source.pixels.byteLength : 0,
+      exportLinear ? bytes * 12 + height * 256 : 0,
     )
     if (
       estimatedBytes > 1024 ** 3 ||
@@ -121,7 +136,8 @@ export class RawGpuRenderer {
         device.limits.maxStorageBufferBindingSize
     )
       throw new Error('This photo exceeds the GPU processing memory limit.')
-    const reuse = !!correction && this.cameraSource === source && !!this.linear
+    const reuse =
+      this.cameraSource === source && !!this.linear && this.correctedMode === !!correction
     if (!reuse) this.releaseFrame()
     const resources: GPUBuffer[] = []
     const makeBuffer = (size: number, usage: number, data?: ArrayBufferView<ArrayBuffer>) => {
@@ -135,7 +151,7 @@ export class RawGpuRenderer {
     try {
       const upload = performance.now()
       const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-      const uniform = makeBuffer(160, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST)
+      const uniform = makeBuffer(240, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST)
       const raw = makeBuffer(source.pixels.byteLength, storage, source.pixels)
       const green = makeBuffer(stripePixels * 8, storage)
       const rgb = makeBuffer(stripePixels * 32, storage)
@@ -158,7 +174,10 @@ export class RawGpuRenderer {
         device.createTexture({
           size: [width, height],
           format: 'rgba32float',
-          usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+          usage:
+            GPUTextureUsage.STORAGE_BINDING |
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.COPY_SRC,
         })
       this.linear = linear
       const bindings: GPUBindingResource[] = [uniform, raw, green, rgb, lab, homo].map(
@@ -188,7 +207,7 @@ export class RawGpuRenderer {
           }),
         ]),
       )
-      const params = new ArrayBuffer(160)
+      const params = new ArrayBuffer(240)
       const ints = new Uint32Array(params),
         floats = new Float32Array(params)
       ints.set([width, height, source.rawWidth, source.flip, source.left, source.top, 0, rows])
@@ -209,6 +228,16 @@ export class RawGpuRenderer {
           floats[28 + r * 4 + c] = sum
         }
       floats[31] = correction ? 1 : 0
+      floats[40] = adjustments.exposureEv
+      floats[41] = adjustments.contrast
+      floats[43] = adjustments.highlights
+      floats[44] = adjustments.shadows
+      floats[45] = adjustments.whites
+      floats[46] = adjustments.blacks
+      const wb = whiteBalanceMatrix(adjustments.whiteBalance, source.whiteBalance)
+      floats[47] = Number(!!wb)
+      for (let r = 0; r < 3; r++)
+        floats.set((wb ?? identityMatrix).slice(r * 3, r * 3 + 3), 48 + r * 4)
       const dispatch = (encoder: GPUCommandEncoder, name: string, dispatchRows: number) => {
         const pass = encoder.beginComputePass({ label: name })
         pass.setPipeline(this.pipelines.get(name)!)
@@ -218,6 +247,7 @@ export class RawGpuRenderer {
       }
       timings.uploadMs = performance.now() - upload
       const processing = performance.now()
+      device.queue.writeBuffer(uniform, 0, params)
       for (let top = 0; !reuse && top < height; top += rows) {
         const count = Math.min(rows, height - top)
         ints[6] = top
@@ -240,6 +270,8 @@ export class RawGpuRenderer {
         staging.destroy()
         return copy
       }
+      this.cameraSource = source
+      this.correctedMode = !!correction
       let corrected: GPUTexture | undefined
       if (correction) {
         const correctionStart = performance.now()
@@ -250,7 +282,10 @@ export class RawGpuRenderer {
         corrected = device.createTexture({
           size: [correction.width, correction.height],
           format: 'rgba32float',
-          usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+          usage:
+            GPUTextureUsage.STORAGE_BINDING |
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.COPY_SRC,
         })
         const lensParams = new ArrayBuffer(80)
         new Uint32Array(lensParams).set([
@@ -306,24 +341,71 @@ export class RawGpuRenderer {
         )
         await device.queue.onSubmittedWorkDone()
         timings.correctionMs = performance.now() - correctionStart
-        timings.reusedLinear = Number(reuse)
       }
       const outWidth = correction?.width ?? width,
         outHeight = correction?.height ?? height
-      const histogramData = new Uint32Array(await readBuffer(histogram, 3 * 8192 * 4))
+      const histogramData =
+        reuse && !correction && this.histogram
+          ? this.histogram
+          : new Uint32Array(await readBuffer(histogram, 3 * 8192 * 4))
+      this.histogram = histogramData
+      timings.reusedLinear = Number(reuse)
       timings.processingMs = performance.now() - processing
       const display = performance.now()
+      floats[42] = displayTransform(histogramData, outWidth * outHeight).white
+      device.queue.writeBuffer(uniform, 0, params)
       device.queue.writeBuffer(curve, 0, displayCurve(histogramData, outWidth * outHeight))
       const encoder = device.createCommandEncoder()
       dispatch(encoder, 'display', height)
       device.queue.submit([encoder.finish()])
       const data = Buffer.from(await readBuffer(output, outWidth * outHeight * 4))
+      let working: WorkingFrame | undefined
+      if (exportLinear) {
+        for (const resource of [output, curve, histogram, uniform]) resource.destroy()
+        const rowBytes = Math.ceil((outWidth * 16) / 256) * 256
+        const staging = makeBuffer(
+          rowBytes * outHeight,
+          GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        )
+        const copy = device.createCommandEncoder()
+        copy.copyTextureToBuffer(
+          { texture: corrected ?? linear },
+          { buffer: staging, bytesPerRow: rowBytes },
+          [outWidth, outHeight],
+        )
+        device.queue.submit([copy.finish()])
+        await staging.mapAsync(GPUMapMode.READ)
+        const sourcePixels = new Float32Array(staging.getMappedRange())
+        const orientedWidth = source.flip & 4 ? outHeight : outWidth
+        const pixels = new Float32Array(outWidth * outHeight * 4)
+        for (let y = 0; y < outHeight; y++)
+          for (let x = 0; x < outWidth; x++) {
+            let dx = source.flip & 1 ? outWidth - 1 - x : x,
+              dy = source.flip & 2 ? outHeight - 1 - y : y
+            if (source.flip & 4) [dx, dy] = [dy, dx]
+            const from = (y * rowBytes) / 4 + x * 4,
+              to = (dy * orientedWidth + dx) * 4
+            for (let c = 0; c < 4; c++) pixels[to + c] = sourcePixels[from + c]
+          }
+        staging.unmap()
+        staging.destroy()
+        working = {
+          data: pixels,
+          width: orientedWidth,
+          height: source.flip & 4 ? outWidth : outHeight,
+          transform: {
+            ...displayTransform(histogramData, outWidth * outHeight),
+            whiteBalance: source.whiteBalance,
+          },
+        }
+      }
       corrected?.destroy()
       timings.displayReadbackMs = performance.now() - display
       const oom = await device.popErrorScope(),
         validation = await device.popErrorScope()
       if (oom || validation) throw new Error((oom ?? validation)!.message)
       return {
+        working,
         data,
         width: source.flip & 4 ? outHeight : outWidth,
         height: source.flip & 4 ? outWidth : outHeight,

@@ -35,6 +35,13 @@ export const librawDecoder: RawDecoder = {
       const camera = decoder.getIParams()
       return {
         metadata: {
+          color: {
+            asShotGains: [0, 1, 2].map((c) => decoder.getCamMul(c)),
+            xyzToCamera: [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) => decoder.getCamXyz(r, c))),
+            cameraToWorking: [0, 1, 2].flatMap((r) =>
+              [0, 1, 2].map((c) => decoder.getRgbCam(r, c)),
+            ),
+          },
           make: camera.normalized_make,
           model: camera.normalized_model,
           rawWidth: decoder.getRawWidth(),

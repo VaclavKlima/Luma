@@ -1,3 +1,5 @@
+import type { PhotoStatistics } from '../shared/statistics'
+import { ADJUSTMENT_VERSION, neutralAdjustments } from '../shared/adjustments'
 import type { ProcessingOptions } from '../shared/lens'
 import { CROP_POLICY, LENS_RENDER_VERSION } from './processing/lens-correction'
 import { rawDecoderDefinitions } from './processing/formats'
@@ -10,11 +12,12 @@ import type { FullPreview } from '../shared/contracts'
 import type { FullPreviewProcessor, FullPreviewResult } from './preview-types'
 
 // Bump whenever decoding, color, or output policy changes.
-export const PREVIEW_VERSION = 'v3'
+export const PREVIEW_VERSION = 'v6'
 const hashPattern = /^[a-f0-9]{64}$/
 const tokenPattern = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
 interface Entry extends FullPreviewResult {
   variant: string
+  sourceKey?: string
   id: string
   revision: string
   path: string
@@ -28,17 +31,20 @@ interface Request {
   token: string
   abort: AbortController
   entry?: Entry
+  linearEntry?: Entry
   work?: Promise<FullPreview | null>
 }
 
 /** One foreground consumer, with serialized disk changes and independent stream leases. */
 export class FullPreviews {
   private entries = new Map<string, Entry>()
+  private background = new Set<Request>()
   private active?: Request
   private running?: Request
   private blocked = new Set<string>()
   private tail: Promise<unknown> = Promise.resolve()
   private closed = false
+  private retainedPhoto?: string
   private directory: string
 
   constructor(
@@ -84,10 +90,24 @@ export class FullPreviews {
           !placeholder.isFile() ||
           placeholder.size !== metadata.placeholderBytes ||
           placeholder.size > 128 * 1024 ||
-          metadata.bytes !== file.size + placeholder.size
+          metadata.bytes !== file.size + placeholder.size + (metadata.linear?.byteLength ?? 0)
         )
           throw new Error('Incomplete preview')
+        if (metadata.linear) {
+          const linear = await stat(join(path, 'linear.f32'))
+          if (
+            linear.size !== file.size * 4 ||
+            linear.size !== metadata.linear.byteLength ||
+            linear.size > 512 * 1024 ** 2 ||
+            !hashPattern.test(metadata.linear.sha256)
+          )
+            throw new Error('Incomplete linear preview')
+        }
         this.entries.set(folder.name, {
+          statistics: metadata.statistics,
+          sourceKey: metadata.sourceKey,
+          linear: metadata.linear,
+          adjustments: metadata.adjustments,
           variant: metadata.variant ?? 'uncorrected',
           settingsRevision: metadata.settingsRevision,
           appliedCorrections: metadata.appliedCorrections,
@@ -101,7 +121,7 @@ export class FullPreviews {
           sha256: metadata.sha256,
           renderId: metadata.renderId,
           placeholderBytes: metadata.placeholderBytes,
-          bytes: file.size + placeholder.size,
+          bytes: file.size + placeholder.size + (metadata.linear?.byteLength ?? 0),
           usedAt: file.mtimeMs,
           pins: 0,
           invalid: false,
@@ -120,6 +140,13 @@ export class FullPreviews {
     })
   }
 
+  requestEditing(id: string, token: string): Promise<FullPreview> {
+    return this.prepare(id, token, false, false, true).then((preview) => {
+      if (!preview?.linear) throw new Error('A floating-point preview is unavailable.')
+      return preview
+    })
+  }
+
   requestCached(id: string, token: string): Promise<FullPreview | null> {
     return this.prepare(id, token, false, true)
   }
@@ -129,6 +156,8 @@ export class FullPreviews {
     token: string,
     regenerate: boolean,
     cachedOnly: boolean,
+    prepareLinear = false,
+    background = false,
   ): Promise<FullPreview | null> {
     if (
       this.closed ||
@@ -141,9 +170,18 @@ export class FullPreviews {
       return Promise.reject(new Error('Invalid preview request.'))
     if (this.blocked.has(id) || !this.original(id))
       return Promise.reject(new Error('This photo is unavailable.'))
-    this.detach(this.active?.id !== id)
+    if (!background) {
+      if (this.retainedPhoto && this.retainedPhoto !== id) this.processor.releaseFrame?.()
+      this.retainedPhoto = id
+    }
+    if (!background) {
+      for (const job of this.background)
+        job.abort.abort(new Error('Statistics interrupted by active preview.'))
+      this.detach(false)
+    }
     const request: Request = { id, token, abort: new AbortController() }
-    this.active = request
+    if (background) this.background.add(request)
+    else this.active = request
     const work = this.enqueue(async () => {
       this.running = request
       try {
@@ -154,7 +192,45 @@ export class FullPreviews {
         }
         check()
         const options = await this.options?.(id, request.abort.signal)
+        if (options) options.prepareLinear = prepareLinear
         check()
+        const sourceKey = options
+          ? createHash('sha256')
+              .update(
+                JSON.stringify([
+                  id,
+                  LENS_RENDER_VERSION,
+                  CROP_POLICY,
+                  rawDecoderDefinitions,
+                  cameraProfiles,
+                  options.metadata.lensProfile.identity,
+                  options.metadata.whiteBalance?.identity,
+                  options.settings,
+                ]),
+              )
+              .digest('hex')
+          : undefined
+        let linearEntry =
+          sourceKey && !regenerate
+            ? [...this.entries.values()].find(
+                (entry) =>
+                  entry.id === id &&
+                  entry.sourceKey === sourceKey &&
+                  entry.linear &&
+                  !entry.invalid,
+              )
+            : undefined
+        if (linearEntry && options) {
+          linearEntry.pins++
+          request.linearEntry = linearEntry
+          options.workingAsset = {
+            path: join(linearEntry.path, 'linear.f32'),
+            width: linearEntry.width,
+            height: linearEntry.height,
+            ...linearEntry.linear!,
+          }
+          options.prepareLinear = false
+        }
         const variant = options
           ? createHash('sha256')
               .update(
@@ -165,7 +241,10 @@ export class FullPreviews {
                   rawDecoderDefinitions,
                   cameraProfiles,
                   options.metadata.lensProfile.identity,
+                  options.metadata.whiteBalance?.identity,
                   options.settings,
+                  options.adjustments ?? neutralAdjustments,
+                  ADJUSTMENT_VERSION,
                 ]),
               )
               .digest('hex')
@@ -217,18 +296,24 @@ export class FullPreviews {
               throw new Error('The decoder produced an invalid preview.')
             await writeFile(
               join(temporary, 'entry.json'),
-              JSON.stringify({ ...dimensions, variant, bytes: file.size + placeholder.size }),
+              JSON.stringify({
+                ...dimensions,
+                sourceKey,
+                variant,
+                bytes: file.size + placeholder.size + (dimensions.linear?.byteLength ?? 0),
+              }),
             )
             check()
             await rename(temporary, path)
             check()
             entry = {
               ...dimensions,
+              sourceKey,
               variant,
               id,
               revision,
               path,
-              bytes: file.size + placeholder.size,
+              bytes: file.size + placeholder.size + (dimensions.linear?.byteLength ?? 0),
               usedAt: Date.now(),
               pins: 0,
               invalid: false,
@@ -240,6 +325,41 @@ export class FullPreviews {
             if (!published) await rm(path, { recursive: true, force: true })
           }
         }
+        if (prepareLinear && !entry.linear && !linearEntry) {
+          const temporary = join(this.directory, `.tmp-${randomUUID()}`)
+          entry.pins++
+          try {
+            await this.prune(entry.byteLength * 5 + entry.placeholderBytes)
+            await mkdir(temporary)
+            const prepared = await this.processor.renderFull(
+              this.original(id)!,
+              temporary,
+              request.abort.signal,
+              options,
+            )
+            check()
+            if (
+              !prepared.linear ||
+              prepared.width !== entry.width ||
+              prepared.height !== entry.height ||
+              prepared.linear.byteLength !== entry.byteLength * 4 ||
+              prepared.linear.byteLength > 512 * 1024 ** 2 ||
+              !hashPattern.test(prepared.linear.sha256)
+            )
+              throw new Error('Invalid linear preview.')
+            const linear = await stat(join(temporary, 'linear.f32'))
+            if (linear.size !== prepared.linear.byteLength)
+              throw new Error('Incomplete linear preview.')
+            await rename(join(temporary, 'linear.f32'), join(entry.path, 'linear.f32'))
+            entry.linear = prepared.linear
+            entry.bytes += prepared.linear.byteLength
+            await writeFile(join(entry.path, 'entry.json'), JSON.stringify(entry))
+          } finally {
+            entry.pins--
+            await rm(temporary, { recursive: true, force: true })
+          }
+        }
+        linearEntry ??= entry.linear ? entry : undefined
         check()
         entry.usedAt = Date.now()
         await utimes(join(entry.path, 'full.rgba'), new Date(), new Date(entry.usedAt))
@@ -249,6 +369,13 @@ export class FullPreviews {
         await this.prune()
         check()
         return {
+          adjustments: entry.adjustments,
+          linear: linearEntry?.linear
+            ? {
+                ...linearEntry.linear,
+                url: `luma-photo://library/${id}/linear/${PREVIEW_VERSION}/${linearEntry.revision}`,
+              }
+            : undefined,
           settingsRevision: options?.revision ?? 0,
           appliedCorrections: entry.appliedCorrections,
           photoId: id,
@@ -262,7 +389,15 @@ export class FullPreviews {
           height: entry.height,
           url: `luma-photo://library/${id}/full/${PREVIEW_VERSION}/${entry.revision}`,
         }
+      } catch (error) {
+        if (this.active === request) this.detach(false)
+        throw error
       } finally {
+        if (background) {
+          if (request.entry) request.entry.pins--
+          if (request.linearEntry) request.linearEntry.pins--
+          this.background.delete(request)
+        }
         if (this.running === request) this.running = undefined
       }
     })
@@ -270,7 +405,54 @@ export class FullPreviews {
     return work
   }
 
+  async statistics(id: string, expectedRevision: number): Promise<PhotoStatistics> {
+    const check = async () => {
+      const options = await this.options?.(id, new AbortController().signal)
+      if (
+        !Number.isSafeInteger(expectedRevision) ||
+        expectedRevision < 0 ||
+        options?.revision !== expectedRevision ||
+        this.blocked.has(id) ||
+        !this.original(id)
+      )
+        throw new Error('Statistics revision conflict or photo unavailable.')
+    }
+    await check()
+    const preview = await this.prepare(id, randomUUID(), false, false, false, true)
+    if (!preview) throw new Error('Statistics frame unavailable.')
+    const lease = this.acquire(new URL(preview.url))
+    if (!lease) throw new Error('Statistics frame unavailable.')
+    try {
+      return await this.enqueue(async () => {
+        await check()
+        const entry = [...this.entries.values()].find(
+          (entry) => entry.path + '/full.rgba' === lease.path,
+        )!
+        if (!entry.statistics) {
+          if (!this.processor.statistics) throw new Error('Statistics processor unavailable.')
+          entry.statistics = await this.processor.statistics(
+            lease.path,
+            preview,
+            new AbortController().signal,
+          )
+          await writeFile(join(entry.path, 'entry.json'), JSON.stringify(entry))
+        }
+        await check()
+        return {
+          ...entry.statistics,
+          photoId: id,
+          revision: expectedRevision,
+          renderingIdentity: preview.renderId,
+        }
+      })
+    } finally {
+      lease.release()
+    }
+  }
+
   settingsChanged(id: string): void {
+    for (const job of this.background)
+      if (job.id === id) job.abort.abort(new Error('Statistics revision conflict.'))
     if (this.active?.id === id) this.detach(false)
   }
 
@@ -278,13 +460,14 @@ export class FullPreviews {
     if (!this.active) return
     this.active.abort.abort(new Error('Preview request cancelled.'))
     if (this.active.entry) this.active.entry.pins--
+    if (this.active.linearEntry) this.active.linearEntry.pins--
     this.active = undefined
     if (releaseFrame) this.processor.releaseFrame?.()
   }
 
   async release(token?: string): Promise<void> {
     if (token !== undefined && this.active?.token !== token) return
-    this.detach()
+    this.detach(token === undefined)
     await this.enqueue(() => this.prune())
   }
 
@@ -306,7 +489,7 @@ export class FullPreviews {
     const [id, kind, version, revision, extra] = url.pathname.slice(1).split('/')
     if (
       extra !== undefined ||
-      (kind !== 'full' && kind !== 'placeholder') ||
+      (kind !== 'full' && kind !== 'placeholder' && kind !== 'linear') ||
       version !== PREVIEW_VERSION ||
       !hashPattern.test(id) ||
       !tokenPattern.test(revision) ||
@@ -315,13 +498,21 @@ export class FullPreviews {
     )
       return
     const entry = this.entries.get(`${id}-${revision}`)
-    if (!entry || entry.invalid) return
+    if (!entry || entry.invalid || (kind === 'linear' && !entry.linear)) return
     entry.pins++
     let released = false
     return {
-      path: join(entry.path, kind === 'full' ? 'full.rgba' : 'placeholder.png'),
-      contentType: kind === 'full' ? 'application/octet-stream' : 'image/png',
-      byteLength: kind === 'full' ? entry.byteLength : entry.placeholderBytes,
+      path: join(
+        entry.path,
+        kind === 'linear' ? 'linear.f32' : kind === 'full' ? 'full.rgba' : 'placeholder.png',
+      ),
+      contentType: kind === 'placeholder' ? 'image/png' : 'application/octet-stream',
+      byteLength:
+        kind === 'linear'
+          ? entry.linear!.byteLength
+          : kind === 'full'
+            ? entry.byteLength
+            : entry.placeholderBytes,
       release: () => {
         if (released) return
         released = true
@@ -333,6 +524,8 @@ export class FullPreviews {
 
   async beginRemoval(id: string): Promise<void> {
     this.blocked.add(id)
+    for (const job of this.background)
+      if (job.id === id) job.abort.abort(new Error('Photo removed.'))
     if (this.active?.id === id) this.detach()
     // A superseded worker may still be stopping while the next photo is queued.
     const running = this.running
@@ -350,8 +543,9 @@ export class FullPreviews {
     void this.enqueue(() => this.prune()).catch(() => undefined)
   }
 
-  private async prune(): Promise<void> {
-    let bytes = [...this.entries.values()].reduce((sum, entry) => sum + entry.bytes, 0)
+  private async prune(reservedBytes = 0): Promise<void> {
+    let bytes =
+      reservedBytes + [...this.entries.values()].reduce((sum, entry) => sum + entry.bytes, 0)
     const entries = [...this.entries.entries()].sort(
       ([, a], [, b]) => Number(b.invalid) - Number(a.invalid) || a.usedAt - b.usedAt,
     )
@@ -372,6 +566,7 @@ export class FullPreviews {
 
   async close(): Promise<void> {
     this.closed = true
+    for (const job of this.background) job.abort.abort(new Error('Preview closed.'))
     this.detach()
     await this.tail
     await this.processor.close()

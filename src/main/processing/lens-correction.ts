@@ -1,7 +1,13 @@
+import {
+  renderAdjustments,
+  neutralAdjustments,
+  type AdjustmentParameters,
+  type WorkingFrame,
+} from '../../shared/adjustments'
 import type { LensProfile, LensSettings, RadialTable } from '../../shared/lens'
 import { appliedCorrections } from '../../shared/lens'
 import type { LinearFrame } from './contracts'
-import { displayCurve } from '../gpu/raw-source'
+import { displayTransform } from '../gpu/raw-source'
 
 export const LENS_RENDER_VERSION = 'camera-linear-lens-bicubic-1'
 export const CROP_POLICY = 'center-native-aspect-1'
@@ -89,7 +95,7 @@ export function cubic(x: number): number {
   x = Math.abs(x)
   return x < 1 ? (1.5 * x - 2.5) * x * x + 1 : x < 2 ? ((-0.5 * x + 2.5) * x - 4) * x + 2 : 0
 }
-export function correctCpu(frame: LinearFrame, plan: CorrectionPlan) {
+export function correctLinearCpu(frame: LinearFrame, plan: CorrectionPlan): WorkingFrame {
   const { width, height } = frame
   const cx = (width - 1) / 2,
     cy = (height - 1) / 2,
@@ -99,7 +105,7 @@ export function correctCpu(frame: LinearFrame, plan: CorrectionPlan) {
     for (let x = 0; x < width; x++)
       gain[y * width + x] = radial(plan.lut, Math.hypot(x - cx, y - cy) / radius, 3)
   // 16-bit converted SDR values are temporary; the retained camera frame stays float.
-  const converted = new Uint16Array(plan.width * plan.height * 3)
+  const converted = new Float32Array(plan.width * plan.height * 3)
   const histogram = new Uint32Array(3 * 8192)
   const weightsX = new Float64Array(4),
     weightsY = new Float64Array(4)
@@ -139,25 +145,18 @@ export function correctCpu(frame: LinearFrame, plan: CorrectionPlan) {
       }
       const offset = (y * plan.width + x) * 3
       for (let c = 0; c < 3; c++) {
-        const value = Math.max(
-          0,
-          Math.min(
-            65535,
-            Math.trunc(
-              frame.matrix[c * 4] * rgb[0] +
-                frame.matrix[c * 4 + 1] * rgb[1] +
-                frame.matrix[c * 4 + 2] * rgb[2],
-            ),
-          ),
-        )
-        converted[offset + c] = value
-        histogram[c * 8192 + (value >> 3)]++
+        const value =
+          frame.matrix[c * 4] * rgb[0] +
+          frame.matrix[c * 4 + 1] * rgb[1] +
+          frame.matrix[c * 4 + 2] * rgb[2]
+        converted[offset + c] = value / 65535
+        histogram[c * 8192 + (Math.max(0, Math.min(65535, Math.trunc(value))) >> 3)]++
       }
     }
-  const curve = displayCurve(histogram, plan.width * plan.height)
+  const transform = displayTransform(histogram, plan.width * plan.height)
   const outWidth = frame.flip & 4 ? plan.height : plan.width,
     outHeight = frame.flip & 4 ? plan.width : plan.height
-  const data = Buffer.alloc(outWidth * outHeight * 4)
+  const data = new Float32Array(outWidth * outHeight * 4)
   for (let y = 0; y < plan.height; y++)
     for (let x = 0; x < plan.width; x++) {
       let dx = frame.flip & 1 ? plan.width - 1 - x : x,
@@ -165,8 +164,21 @@ export function correctCpu(frame: LinearFrame, plan: CorrectionPlan) {
       if (frame.flip & 4) [dx, dy] = [dy, dx]
       const source = (y * plan.width + x) * 3,
         target = (dy * outWidth + dx) * 4
-      for (let c = 0; c < 3; c++) data[target + c] = curve[converted[source + c]]
-      data[target + 3] = 255
+      for (let c = 0; c < 3; c++) data[target + c] = converted[source + c]
+      data[target + 3] = 1
     }
-  return { data, width: outWidth, height: outHeight }
+  return { data, width: outWidth, height: outHeight, transform }
+}
+
+export function correctCpu(
+  frame: LinearFrame,
+  plan: CorrectionPlan,
+  adjustments: AdjustmentParameters = neutralAdjustments,
+) {
+  const working = correctLinearCpu(frame, plan)
+  return {
+    data: Buffer.from(renderAdjustments(working.data, adjustments, working.transform)),
+    width: working.width,
+    height: working.height,
+  }
 }

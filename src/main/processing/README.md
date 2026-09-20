@@ -177,7 +177,7 @@ Preserve these behaviors when integrating a backend:
 - Preserve CPU fallback, cancellation, stream leases, deletion, shutdown, and release of retained frames. Retain at most the active photo's bounded intermediate; current GPU allocation estimates are capped at 1 GiB.
 - Keep renderer requests limited to typed photo-ID operations. File paths and native resources remain in the privileged worker boundary.
 
-General editing, HDR, manual profile selection, and longitudinal chromatic-aberration correction remain separate milestones.
+Additional adjustments, HDR, manual profile selection, and longitudinal chromatic-aberration correction remain separate milestones.
 
 ## Versions and cache invalidation
 
@@ -190,13 +190,13 @@ General editing, HDR, manual profile selection, and longitudinal chromatic-aberr
 | Change crop policy                                                               | `CROP_POLICY` in `lens-correction.ts`                                                                             |
 | Change broader frame/cache format or output policy not covered by the module key | `PREVIEW_VERSION` in [full-previews.ts](../full-previews.ts)                                                      |
 
-The preview key includes the original content hash, decoder definitions, camera profiles, correction-data identity, settings, lens rendering version, and crop policy. A backend render ID alone does not invalidate the cache key. Settings revisions protect requests from stale responses; they are not pixel identities, so returning to identical settings can reuse a cached variant. All variants and their exact placeholders share the 2 GiB disk-cache budget.
+The preview key includes the original content hash, decoder definitions, camera profiles, correction-data identity, settings, lens rendering version, and crop policy. A backend render ID alone does not invalidate the cache key. Settings revisions protect requests from stale responses; they are not pixel identities, so returning to identical settings can reuse a cached variant. All variants, their exact placeholders, and prepared floating-point assets share the 2 GiB disk-cache budget. Exposure, contrast, highlights, shadows, whites, blacks, and lens settings use the shared schema-7, settings-v4 edit document and history; see [exposure and presentation](../../../docs/raw-processing.md#exposure-and-presentation--september-2026).
 
 ## Verify the module
 
 Use licensed, attributed fixtures and record their provenance in [tests/fixtures/README.md](../../../tests/fixtures/README.md). Synthetic test data belongs in tests, never in production profiles. The [second camera/provider test](../../../tests/lens-correction.spec.ts) demonstrates extension through injected registries without viewer changes.
 
-Before changing rendering, save a baseline from `npm run benchmark:preview`. Copy its generated `benchmark.json` outside `test-results`, which subsequent test runs may clear. After implementation:
+For performance work, save a baseline from `npm run benchmark:preview`. Its unique artifact directory survives subsequent verification runs. For correctness changes, use focused verification; measure benchmarks at milestones or during performance work. After implementation:
 
 1. Test provider selection, unrelated files, missing/malformed tables, independent availability, unequal lengths, calibration boundaries, and stable identities.
 2. Compare grids, synthetic brightness falloff, and deliberately displaced channels with the CPU reference. Cover sensor margins, portrait orientation, all supported flips, native crop dimensions, and CPU/GPU agreement.
@@ -207,13 +207,14 @@ Useful focused checks, run from the repository root:
 
 ```sh
 npm run build
-npx playwright test tests/lens-correction.spec.ts tests/gpu-preview.spec.ts tests/full-previews.spec.ts tests/library.spec.ts tests/lens-ui.spec.ts
+npm run verify -- preview adjustments library
 ```
 
 Run the complete required checks before shipping a processing change:
 
 ```sh
-npm run check
+npm run verify -- preview adjustments
+# At milestones or during performance work:
 LUMA_PREVIEW_BASELINE=/absolute/path/baseline.json npm run benchmark:preview
 npm run mcp:test
 ```
@@ -222,4 +223,18 @@ The benchmark requires the uncorrected CPU and GPU paths to stay within 15% of t
 
 `LUMA_RAW_TEST_FILES` accepts a JSON array of absolute paths for additional GPU regression samples; `LUMA_RAW_BENCHMARK_FILE` selects one benchmark RAW. Keep private samples outside committed fixtures. Report hardware skips and unverified platforms explicitly.
 
-For manual acceptance, start `npm run dev:mcp`, inspect the actual renderer with `luma_ui`, and run `npm run mcp:check` against that window. Follow [testing.md](../../../docs/testing.md) for isolated libraries, MCP setup, and process cleanup. Record commands, fixture coverage, pixel comparisons, performance results, and any remaining limitations in the contribution.
+For visual changes or unresolved UI problems, start `npm run dev:mcp`, inspect the actual renderer with `luma_ui`, and run `npm run mcp:check` against that window. Follow [testing.md](../../../docs/testing.md) for isolated libraries, MCP setup, and process cleanup. Record commands, fixture coverage, pixel comparisons, performance results, and any remaining limitations in the contribution.
+
+## Register another display adjustment
+
+1. Declare a module beside `src/shared/contrast.ts` with an ID, version, limits/default, and matching CPU, GLSL, and WGSL functions. Register it in `adjustmentModules` in `src/shared/adjustments.ts`, and explicitly add its execution in the same order in CPU conversion, native `ahdShader` display, and the WebGL presenter. Registration alone does not execute a module. Keep decoder/camera/lens work upstream.
+2. Extend `AdjustmentParameters`, neutral defaults, complete-state equality, edit validation, and the editing MCP schema. Add an explicit settings/catalog migration for **current settings and all snapshots**, preserving cursor, redo, revision, and timestamps transactionally. Never insert fake migration edits into history.
+3. Pass parameters through the worker, committed rendering, uniform data, and the fallback worker. Include module versions and values in rendered-frame identity, but do not put display adjustments in upstream working-asset identity. Bump the cache output version when changing pixel policy.
+4. Use `AdjustmentInput` and typed controller patches for numeric sliders, following [input design](../../../docs/input-design.md). Flush the previous control before starting another; keep history in the workspace toolbar. Other input types can use the same controller without owning persistence.
+5. Verify independent curve invariants, neutral byte identity, alpha, CPU/native/WebGL agreement on synthetic and real RAW pixels, complete-state fallback coalescing, migration rollback/redo, mixed history, MCP conflicts, restart/shutdown, and texture/upstream reuse. Extend the warmed interaction benchmark while retaining the neutral 15% regression gate and p95 ≤33 ms target.
+
+## Add a white-balance provider
+
+Implement `WhiteBalanceProvider` from `contracts.ts` and register it in `white-balance.ts`. Resolve a profile only for independently verified camera models; keep aliases and capability flags in `cameras/`. The decoder adapter supplies owned numeric arrays for original As Shot gains, XYZ-to-camera characterization, and camera-to-working RGB conversion. A provider supplies stable identity/version, model version, supported ranges and estimated readouts. Validate finite, invertible matrices and positive channel responses across the complete supported range. Do not add camera names to CPU arithmetic, GLSL, WGSL or UI code.
+
+The shared resolver computes a working-space 3×3 transform, so a new provider does not change shaders or controls. Adding camera support requires real fixtures and attribution, measured reference values, temperature/tint direction, As Shot byte identity, combined CPU/native GPU/WebGL/Canvas2D agreement, alpha, corrections and cache reuse tests. `white-balance.spec.ts` includes a synthetic second provider solely to verify modularity; it does not establish support for another camera. Current verified profiles remain Sony ZV-1/ZV-1A.

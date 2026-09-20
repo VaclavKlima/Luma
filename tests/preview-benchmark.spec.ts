@@ -1,8 +1,10 @@
-import { automaticLensSettings } from '../src/shared/lens'
+import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PreviewProcess } from '../src/main/preview-process'
+import type { PreviewPresenter } from '../src/renderer/src/preview/presenter'
+import { automaticLensSettings } from '../src/shared/lens'
 import { expect, test } from './electron.fixture'
 
 test('benchmarks RAW processing and actual Electron frame presentation', async ({ luma }, info) => {
@@ -24,6 +26,7 @@ import { LibRaw } from '@colorhythm/libraw-wasm';
 sharp.concurrency(1); sharp.cache({memory:32,files:0,items:20});
 process.on('message',async ({path,output,type})=>{
  if(type==='close') process.exit(0);
+ if(type==='release') return;
  try {
   await LibRaw.initialize(); const d=new LibRaw(); await d.waitUntilReady();
   const b=await readFile(path); d.open(b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength));
@@ -76,6 +79,18 @@ process.on('message',async ({path,output,type})=>{
     })
   }, root)
   await luma.page.reload()
+  const presenterBundle = await build({
+    entryPoints: ['src/renderer/src/preview/presenter.ts'],
+    bundle: true,
+    write: false,
+    format: 'iife',
+    globalName: 'LumaBenchmark',
+    define: { 'import.meta.url': JSON.stringify('file:///unused-benchmark-worker.js') },
+  })
+  await luma.page.evaluate(
+    `${presenterBundle.outputFiles[0].text}; globalThis.lumaBenchmark = LumaBenchmark;`,
+  )
+
   const results: {
     kind: string
     generationMs: number
@@ -122,12 +137,12 @@ process.on('message',async ({path,output,type})=>{
               canvas.width = result.width
               canvas.height = result.height
               canvas.style.cssText = 'position:fixed;inset:0;width:800px;height:auto;z-index:10000'
-              const context = canvas.getContext('2d', { colorSpace: 'srgb' })!
+              let presenter: PreviewPresenter | undefined
               if (kind === 'legacy') {
                 const image = new Image()
                 image.src = 'luma-photo://library/legacy'
                 await image.decode()
-                context.drawImage(image, 0, 0)
+                canvas.getContext('2d', { colorSpace: 'srgb' })!.drawImage(image, 0, 0)
               } else {
                 const cache = window as unknown as { benchmarkBitmap?: ImageBitmap }
                 if (!cached || !cache.benchmarkBitmap) {
@@ -147,12 +162,36 @@ process.on('message',async ({path,output,type})=>{
                     }),
                   )
                 }
-                context.drawImage(cache.benchmarkBitmap, 0, 0)
+                const Constructor = (
+                  window as unknown as {
+                    lumaBenchmark: { PreviewPresenter: typeof PreviewPresenter }
+                  }
+                ).lumaBenchmark.PreviewPresenter
+                // Match the application: present RGBA immediately through Canvas2D, then
+                // prepare the WebGL editing surface after first display (measured below).
+                presenter = new Constructor(canvas, true, () => {
+                  throw new Error('Benchmark context lost')
+                })
+                presenter.setBitmap(cache.benchmarkBitmap)
+                canvas.style.cssText =
+                  'position:fixed;inset:0;width:800px;height:600px;z-index:10000'
+                presenter.draw(
+                  result,
+                  { width: 800, height: 600 },
+                  {
+                    fit: true,
+                    scale: Math.min(800 / result.width, 600 / result.height),
+                    x: 0,
+                    y: 0,
+                  },
+                  { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: 0 },
+                )
               }
               document.body.append(canvas)
               await new Promise<void>((resolve) =>
                 requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
               )
+              presenter?.dispose()
               canvas.remove()
               canvas.width = 0
               canvas.height = 0

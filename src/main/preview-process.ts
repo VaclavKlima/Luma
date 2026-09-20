@@ -1,3 +1,4 @@
+import type { ImageStatistics } from '../shared/statistics'
 import type { ProcessingMetadata, ProcessingOptions } from '../shared/lens'
 import { fork, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -72,19 +73,27 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
     )
     // Preserve GPU shader compilation across nearby requests. CPU RAW processing has a
     // much larger WASM high-water mark; reclaim that process after its completed render.
-    if (
-      result.diagnostics?.backend !== 'gpu' &&
-      !Object.values(result.appliedCorrections ?? {}).some(Boolean)
-    )
-      await this.close(true)
-    else {
-      this.idle = setTimeout(() => {
-        void this.close()
-      }, 30_000)
-      this.idle.unref()
-    }
+    this.idle = setTimeout(() => {
+      void this.close()
+    }, 30_000)
+    this.idle.unref()
     if (process.env.LUMA_PREVIEW_DIAGNOSTICS) console.info('Full preview', result.diagnostics)
     return result
+  }
+
+  statistics(
+    path: string,
+    frame: { width: number; height: number; sha256: string },
+    signal: AbortSignal,
+  ): Promise<ImageStatistics> {
+    return this.run<ImageStatistics>('statistics', path, '', signal, undefined, frame).finally(
+      () => {
+        this.idle = setTimeout(() => {
+          void this.close()
+        }, 30_000)
+        this.idle.unref()
+      },
+    )
   }
 
   releaseFrame(): void {
@@ -92,11 +101,12 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
   }
 
   private async run<T>(
-    mode: 'process' | 'full' | 'metadata',
+    mode: 'process' | 'full' | 'metadata' | 'statistics',
     path: string,
     output: string,
     signal: AbortSignal,
     options?: ProcessingOptions,
+    frame?: { width: number; height: number; sha256: string },
   ): Promise<T> {
     signal.throwIfAborted()
     clearTimeout(this.idle)
@@ -153,7 +163,7 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
         worker.once('exit', exited)
         worker.once('error', failed)
         signal.addEventListener('abort', aborted, { once: true })
-        worker.send({ type: mode, path, output, options }, (error) => {
+        worker.send({ type: mode, path, output, options, frame }, (error) => {
           if (error) failed(error)
         })
       })

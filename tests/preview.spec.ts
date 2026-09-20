@@ -6,8 +6,14 @@ import { importPhotos } from './import.helpers'
 async function geometry(page: Page) {
   return page.getByTestId('preview-viewport').evaluate((element) => {
     const viewport = element.getBoundingClientRect()
-    const image = element.querySelector('canvas')!
-    const bounds = image.getBoundingClientRect()
+    const bounds = {
+      width:
+        Number(element.getAttribute('data-image-width')) *
+        Number(element.getAttribute('data-scale')),
+      height:
+        Number(element.getAttribute('data-image-height')) *
+        Number(element.getAttribute('data-scale')),
+    }
     return {
       scale: Number(element.getAttribute('data-scale')),
       x: Number(element.getAttribute('data-pan-x')),
@@ -18,8 +24,8 @@ async function geometry(page: Page) {
       top: viewport.top,
       imageWidth: bounds.width,
       imageHeight: bounds.height,
-      naturalWidth: image.width,
-      naturalHeight: image.height,
+      naturalWidth: Number(element.getAttribute('data-image-width')),
+      naturalHeight: Number(element.getAttribute('data-image-height')),
     }
   })
 }
@@ -107,7 +113,7 @@ test('zooms at the pointer, pans with capture, and retains keyboard and context-
   await expect(zoom).toHaveValue('1')
   await viewport.dblclick()
   await expect(zoom).toHaveValue('fit')
-  await zoom.selectOption('4')
+  await zoom.selectOption('32')
   await expect(page.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled()
   await zoom.selectOption('0.1')
   await expect(page.getByRole('button', { name: 'Zoom out', exact: true })).toBeDisabled()

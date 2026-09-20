@@ -1,3 +1,11 @@
+import {
+  initialSettings,
+  SETTINGS_VERSION,
+  validatePatch,
+  type EditState,
+  type EditPatch,
+  type EditHistory,
+} from '../shared/edits'
 import { photoExtensions } from './processing/formats'
 import {
   automaticLensSettings,
@@ -55,6 +63,7 @@ interface Session {
 export class PhotoLibrary {
   readonly fullPreviews: FullPreviews
   private db!: DatabaseSync
+  private lensTail: Promise<unknown> = Promise.resolve()
   private metadataTail: Promise<unknown> = Promise.resolve()
   private removals!: RemovalStore
   private session?: Session
@@ -101,10 +110,65 @@ export class PhotoLibrary {
     this.db = new DatabaseSync(join(this.root, 'catalog.sqlite'))
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     const version = this.db.prepare('PRAGMA user_version').get() as { user_version: number }
-    if (version.user_version > 3) throw new Error('This library requires a newer version of Luma.')
+    if (version.user_version > 8) throw new Error('This library requires a newer version of Luma.')
     this.db.exec(
-      'BEGIN; CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, imported_at TEXT NOT NULL, photo TEXT NOT NULL); CREATE TABLE IF NOT EXISTS removals (id TEXT PRIMARY KEY, staged TEXT NOT NULL); CREATE TABLE IF NOT EXISTS processing (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_processing AFTER DELETE ON photos BEGIN DELETE FROM processing WHERE id = old.id; END; PRAGMA user_version = 3; COMMIT;',
+      'BEGIN; CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, imported_at TEXT NOT NULL, photo TEXT NOT NULL); CREATE TABLE IF NOT EXISTS removals (id TEXT PRIMARY KEY, staged TEXT NOT NULL); CREATE TABLE IF NOT EXISTS processing (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_processing AFTER DELETE ON photos BEGIN DELETE FROM processing WHERE id = old.id; END; CREATE TABLE IF NOT EXISTS edits (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_edits AFTER DELETE ON photos BEGIN DELETE FROM edits WHERE id = old.id; END;',
     )
+    try {
+      for (const row of this.db.prepare('SELECT id, data FROM edits').all() as {
+        id: string
+        data: string
+      }[]) {
+        const history = JSON.parse(row.data)
+        let migrated = false
+        for (const settings of [
+          history.settings,
+          ...history.snapshots.map(
+            (snapshot: { settings: { version: number; contrast?: number } }) => snapshot.settings,
+          ),
+        ]) {
+          if (settings.version === 1) {
+            settings.version = 2
+            settings.contrast = 0
+            migrated = true
+          }
+          if (settings.version === 2) {
+            settings.version = 3
+            settings.highlights = 0
+            migrated = true
+          }
+          if (settings.version === 3) {
+            settings.version = 4
+            settings.shadows = 0
+            settings.whites = 0
+            settings.blacks = 0
+            migrated = true
+          }
+          if (settings.version === 4) {
+            settings.version = SETTINGS_VERSION
+            settings.whiteBalance = { mode: 'as-shot' }
+            migrated = true
+          } else if (settings.version !== SETTINGS_VERSION) {
+            throw new Error('These edits require a newer version of Luma.')
+          }
+        }
+        if (migrated)
+          this.db
+            .prepare('UPDATE edits SET data = ? WHERE id = ?')
+            .run(JSON.stringify(history), row.id)
+      }
+      for (const row of this.db.prepare('SELECT id, data FROM processing').all() as {
+        id: string
+        data: string
+      }[]) {
+        const data = JSON.parse(row.data) as ProcessingOptions
+        this.ensureEdits(row.id, data)
+      }
+      this.db.exec('PRAGMA user_version = 8; COMMIT;')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
     this.removals = new RemovalStore(this.root, this.db, this.trash)
     await this.removals.recover()
     // Only application-owned, unpublished files are recovered here.
@@ -127,7 +191,23 @@ export class PhotoLibrary {
   private readProcessing(id: string): ProcessingOptions | undefined {
     const row = this.db.prepare('SELECT data FROM processing WHERE id = ?').get(id) as
       { data: string } | undefined
-    return row ? (JSON.parse(row.data) as ProcessingOptions) : undefined
+    if (!row) return undefined
+    const data = JSON.parse(row.data) as ProcessingOptions
+    const edits = this.ensureEdits(id, data)
+    return {
+      ...data,
+      settings: edits.settings.lens,
+      adjustments: {
+        whiteBalance: edits.settings.whiteBalance,
+        exposureEv: edits.settings.exposureEv,
+        contrast: edits.settings.contrast,
+        highlights: edits.settings.highlights,
+        shadows: edits.settings.shadows,
+        whites: edits.settings.whites,
+        blacks: edits.settings.blacks,
+      },
+      revision: edits.revision,
+    }
   }
 
   private async processingOptions(
@@ -177,26 +257,155 @@ export class PhotoLibrary {
     }
   }
 
-  async updateLensSettings(id: string, kind: CorrectionKind, enabled: boolean): Promise<LensState> {
-    if (!correctionKinds.includes(kind) || typeof enabled !== 'boolean')
-      throw new Error('Invalid lens correction setting.')
+  private ensureEdits(id: string, data: ProcessingOptions): EditHistory {
+    const row = this.db.prepare('SELECT data FROM edits WHERE id = ?').get(id) as
+      { data: string } | undefined
+    if (row) {
+      const history = JSON.parse(row.data) as EditHistory
+      if (
+        history.settings.version !== SETTINGS_VERSION ||
+        history.snapshots.some((snapshot) => snapshot.settings.version !== SETTINGS_VERSION)
+      )
+        throw new Error('These edits require a newer version of Luma.')
+      return history
+    }
+    const settings = initialSettings(data.settings)
+    const history: EditHistory = {
+      photoId: id,
+      revision: data.revision,
+      settings,
+      canUndo: false,
+      canRedo: false,
+      cursor: 0,
+      snapshots: [{ settings, createdAt: new Date().toISOString() }],
+    }
+    this.db.prepare('INSERT INTO edits (id, data) VALUES (?, ?)').run(id, JSON.stringify(history))
+    return history
+  }
+
+  async getEditHistory(id: string): Promise<EditHistory> {
+    const data = await this.processingOptions(id)
+    if (this.closed || !this.find(id)) throw new Error('This photo is unavailable.')
+    return this.ensureEdits(id, data)
+  }
+
+  getPhotoStatistics(id: string, expectedRevision: number) {
+    return this.fullPreviews.statistics(id, expectedRevision)
+  }
+
+  async getEdits(id: string): Promise<EditState> {
+    return this.editState(await this.getEditHistory(id))
+  }
+
+  private editState(history: EditHistory): EditState {
+    const { photoId, revision, settings, canUndo, canRedo } = history
+    return {
+      photoId,
+      revision,
+      settings,
+      canUndo,
+      canRedo,
+      whiteBalanceProfile: this.readProcessing(photoId)?.metadata.whiteBalance,
+    }
+  }
+
+  private publishEdit(history: EditHistory, expectedRevision: number): EditState {
+    if (
+      !Number.isSafeInteger(expectedRevision) ||
+      expectedRevision < 0 ||
+      history.revision !== expectedRevision
+    )
+      throw new Error('Edit conflict: reload the confirmed settings and try again.')
+    const previous = this.ensureEdits(history.photoId, this.readProcessing(history.photoId)!)
+    const lensChanged =
+      JSON.stringify(previous.settings.lens) !== JSON.stringify(history.settings.lens)
+    history.revision++
+    history.canUndo = history.cursor > 0
+    history.canRedo = history.cursor < history.snapshots.length - 1
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db
+        .prepare('UPDATE edits SET data = ? WHERE id = ?')
+        .run(JSON.stringify(history), history.photoId)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    this.fullPreviews.settingsChanged(history.photoId)
+    this.emit({
+      editsChanged: { photoId: history.photoId, revision: history.revision },
+      lensChanged: lensChanged
+        ? { photoId: history.photoId, revision: history.revision }
+        : undefined,
+    })
+    return this.editState(history)
+  }
+
+  async updateEdits(id: string, patch: EditPatch, expectedRevision: number): Promise<EditState> {
+    validatePatch(patch)
     await this.processingOptions(id)
     if (this.closed || !this.find(id)) throw new Error('This photo is unavailable.')
     const data = this.readProcessing(id)!
-    if (!data.metadata.lensProfile[kind]) throw new Error('This correction is unavailable.')
-    if (data.settings[kind] !== enabled) {
-      data.settings[kind] = enabled
-      data.revision++
-      this.db.prepare('UPDATE processing SET data = ? WHERE id = ?').run(JSON.stringify(data), id)
-      this.fullPreviews.settingsChanged(id)
-      this.emit({ lensChanged: { photoId: id, revision: data.revision } })
+    const history = this.ensureEdits(id, data)
+    if (
+      !Number.isSafeInteger(expectedRevision) ||
+      expectedRevision < 0 ||
+      history.revision !== expectedRevision
+    )
+      throw new Error('Edit conflict: reload the confirmed settings and try again.')
+    for (const kind of correctionKinds)
+      if (patch.lens?.[kind] !== undefined && !data.metadata.lensProfile[kind])
+        throw new Error('This correction is unavailable.')
+    if (patch.whiteBalance?.mode === 'custom' && !data.metadata.whiteBalance)
+      throw new Error('White balance is unavailable for this camera.')
+    const settings = {
+      ...history.settings,
+      ...patch,
+      lens: { ...history.settings.lens, ...patch.lens },
     }
-    return {
-      photoId: id,
-      revision: data.revision,
-      settings: data.settings,
-      profile: data.metadata.lensProfile,
+    if (JSON.stringify(settings) === JSON.stringify(history.settings)) {
+      return this.editState(history)
     }
+    history.settings = settings
+    history.snapshots = history.snapshots.slice(0, history.cursor + 1)
+    history.snapshots.push({ settings, createdAt: new Date().toISOString() })
+    history.cursor++
+    return this.publishEdit(history, expectedRevision)
+  }
+
+  async undoEdit(id: string, expectedRevision: number): Promise<EditState> {
+    return this.moveEdit(id, expectedRevision, -1)
+  }
+  async redoEdit(id: string, expectedRevision: number): Promise<EditState> {
+    return this.moveEdit(id, expectedRevision, 1)
+  }
+  private async moveEdit(
+    id: string,
+    expectedRevision: number,
+    direction: -1 | 1,
+  ): Promise<EditState> {
+    await this.processingOptions(id)
+    if (this.closed || !this.find(id)) throw new Error('This photo is unavailable.')
+    const history = this.ensureEdits(id, this.readProcessing(id)!)
+    const cursor = history.cursor + direction
+    if (cursor < 0 || cursor >= history.snapshots.length)
+      throw new Error('No edit history in that direction.')
+    history.cursor = cursor
+    history.settings = history.snapshots[cursor].settings
+    return this.publishEdit(history, expectedRevision)
+  }
+
+  async updateLensSettings(id: string, kind: CorrectionKind, enabled: boolean): Promise<LensState> {
+    if (!correctionKinds.includes(kind) || typeof enabled !== 'boolean')
+      throw new Error('Invalid lens correction setting.')
+    const work = this.lensTail.then(async () => {
+      const state = await this.getEdits(id)
+      await this.updateEdits(id, { lens: { [kind]: enabled } }, state.revision)
+      return this.getLensSettings(id)
+    })
+    this.lensTail = work.catch(() => undefined)
+    return work
   }
 
   list(offset = 0): PhotoPage {

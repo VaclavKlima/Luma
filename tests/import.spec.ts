@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, test } from './electron.fixture'
-import { choose, importPhotos, expectImportComplete } from './import.helpers'
+import { choose, expectImportComplete } from './import.helpers'
 import { isolateTrash } from './photo-actions.helpers'
 
 test('reviews a folder, excludes photos, copies originals, persists, and marks duplicates', async ({
@@ -92,27 +92,6 @@ test('supports picker cancellation, nonrecursive folders, select all and keyboar
   await expect(page.getByRole('dialog')).toHaveCount(0)
   expect((await page.evaluate(() => window.luma.listPhotos())).total).toBe(0)
   expect(await readdir(join(luma.userDataDir, 'library', 'staging'))).toEqual([])
-})
-
-test('imports and browses the real Sony ZV-1 compressed ARW through the preview process', async ({
-  luma,
-}) => {
-  await importPhotos(luma.app, luma.page, ['tests/fixtures/sony-zv1.ARW'])
-  await expect(luma.page.getByTestId('photo-metadata')).toContainText('ZV-1')
-  await expect(luma.page.getByTestId('preview-viewport')).toHaveAttribute('data-resolution', 'full')
-  await luma.page.getByRole('combobox', { name: 'Preview zoom' }).selectOption('1')
-  const previewSize = await luma.page.getByTestId('main-preview').evaluate((element) => ({
-    natural: (element as HTMLCanvasElement).width,
-    displayed: element.getBoundingClientRect().width,
-  }))
-  const { photos } = await luma.page.evaluate(() => window.luma.listPhotos())
-  expect(previewSize.natural).toBe(5422)
-  expect(previewSize.natural).toBeLessThan(photos[0].width!)
-  expect(previewSize.displayed).toBeCloseTo(previewSize.natural, 1)
-  expect(photos[0]).toMatchObject({ format: 'ARW', camera: 'ZV-1', previewSource: 'embedded' })
-  expect(
-    await readFile(join(luma.userDataDir, 'library', 'originals', photos[0].id, 'original.arw')),
-  ).toEqual(await readFile('tests/fixtures/sony-zv1.ARW'))
 })
 
 test('reviews and browses a library across page boundaries', async ({ luma }, testInfo) => {

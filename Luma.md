@@ -21,7 +21,11 @@ The application is intended for photographers working with local photographs, in
 
 The default interface will be dark and color-neutral: a large preview in the center, a gallery and navigation on the left, adjustments on the right, and a collapsible terminal at the bottom.
 
-Exposure merging, generative retouching, automatic masking, and cloud synchronization belong to later releases.
+The complete HDR destination includes exposure merging: RAW brackets or supported HDR files → nondestructive HDR editing → HDR and SDR preview → HDR and SDR export. Single RAW photographs also use this HDR processing foundation. Exposure merging follows the processing and display foundations as a staged milestone; the complete destination is not finished until merging and file interoperability are verified. The [feature roadmap and implementation briefs](docs/features/README.md) define this order and its acceptance gates.
+
+These are planned capabilities. The current application provides a managed library, persisted light adjustments, verified Sony RAW white balance and lens corrections, shared history, and SDR preview analysis. Its RGBA8 sRGB display frames and bounded floating-point preview assets are not HDR editing masters. HDR merging, true HDR presentation, and export are not implemented; the console remains read-only.
+
+Generative retouching, automatic masking, and cloud synchronization belong to later releases.
 
 ## Technical direction and interfaces
 

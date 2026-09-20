@@ -1,3 +1,4 @@
+import type { WhiteBalanceProfile } from '../../shared/white-balance'
 import type { ProcessingMetadata, LensProfile } from '../../shared/lens'
 import type { RawSource } from '../gpu/raw-source'
 
@@ -7,6 +8,7 @@ export interface CameraProfile {
   make: string
   aliases: readonly string[]
   gpu?: { algorithm: 'bayer-ahd'; cfa: readonly [0, 1, 3, 2]; colors: 3; pixelAspect: 1 }
+  whiteBalance?: string
   coordinates: 'active-sensor'
   orientation: 'decoder-flip-once'
 }
@@ -22,7 +24,13 @@ export interface LinearFrame {
   flip: number
   matrix: number[]
 }
+export interface WhiteBalanceProvider {
+  id: string
+  version: string
+  resolve(metadata: RawMetadata): WhiteBalanceProfile | null
+}
 export interface RawMetadata {
+  color?: Pick<WhiteBalanceProfile, 'asShotGains' | 'xyzToCamera' | 'cameraToWorking'>
   make: string
   model: string
   rawWidth: number

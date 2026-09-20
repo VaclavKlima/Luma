@@ -8,7 +8,13 @@ const labels: Record<CorrectionKind, string> = {
   chromaticAberration: 'Lateral chromatic aberration',
 }
 
-export function LensCorrections({ photoId }: { photoId: string }) {
+export function LensCorrections({
+  photoId,
+  flushEdits,
+}: {
+  photoId: string
+  flushEdits: () => Promise<void>
+}) {
   const [state, setState] = useState<LensState | null>(null)
   const [error, setError] = useState('')
   const pending = useRef(0)
@@ -43,6 +49,7 @@ export function LensCorrections({ photoId }: { photoId: string }) {
       previous ? { ...previous, settings: { ...previous.settings, [kind]: enabled } } : previous,
     )
     try {
+      await flushEdits()
       await window.luma.updateLensSettings(photoId, kind, enabled)
     } catch (error) {
       setError(String(error))

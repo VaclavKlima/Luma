@@ -22,6 +22,7 @@
     "src/shared/**/*.ts",
     "src/renderer/src/env.d.ts",
     "src/renderer/src/preview/**/*.ts",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    "scripts/**/*.ts"
   ]
 }

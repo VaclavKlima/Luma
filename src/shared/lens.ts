@@ -1,4 +1,7 @@
-export const PROCESSING_METADATA_VERSION = 1
+import type { WhiteBalanceProfile } from './white-balance'
+import type { AdjustmentParameters } from './adjustments'
+import type { DisplayTransform } from './adjustments'
+export const PROCESSING_METADATA_VERSION = 2
 export const correctionKinds = ['distortion', 'vignetting', 'chromaticAberration'] as const
 export type CorrectionKind = (typeof correctionKinds)[number]
 export type LensSettings = Record<CorrectionKind, boolean>
@@ -29,6 +32,7 @@ export interface LensProfile {
   unavailable: Partial<Record<CorrectionKind, string>>
 }
 export interface ProcessingMetadata {
+  whiteBalance?: WhiteBalanceProfile
   version: number
   make?: string
   model?: string
@@ -45,6 +49,17 @@ export interface LensState {
   profile: LensProfile
 }
 export interface ProcessingOptions {
+  /** Main-process owned cache asset, never accepted from the renderer. */
+  workingAsset?: {
+    path: string
+    width: number
+    height: number
+    byteLength: number
+    sha256: string
+    transform: DisplayTransform
+  }
+  adjustments?: AdjustmentParameters
+  prepareLinear?: boolean
   metadata: ProcessingMetadata
   settings: LensSettings
   revision: number

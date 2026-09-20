@@ -1,14 +1,34 @@
 import { defineConfig } from '@playwright/test'
+import { randomUUID } from 'node:crypto'
+import { resolve, join } from 'node:path'
+import { suites, type Group } from './scripts/verification-plan'
+
+const runDirectory =
+  process.env.LUMA_VERIFICATION_DIR ??
+  resolve('artifacts/verification', `playwright-${Date.now()}-${randomUUID()}`)
+const output = join(runDirectory, process.env.LUMA_TEST_GROUP ?? 'playwright')
+const groups: Group[] = ['node', 'service', 'electron', 'raw-gpu']
+if (process.env.LUMA_PREVIEW_BENCHMARK === '1') groups.splice(0, groups.length, 'benchmark')
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: '**/*.spec.ts',
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   timeout: 45_000,
   expect: { timeout: 7_500 },
-  outputDir: 'test-results',
-  reporter: [['list'], ['html', { open: 'never' }]],
+  outputDir: join(output, 'results'),
+  reporter: [
+    ['list'],
+    ['html', { open: 'never', outputFolder: join(output, 'report') }],
+    ['./scripts/verification-reporter.ts', { outputDir: output }],
+  ],
+  projects: groups.map((name) => ({
+    name,
+    workers: name === 'node' ? 2 : 1,
+    testMatch: suites
+      .filter((suite) => suite.group === name)
+      .map((suite) => `**/${suite.file.slice(6)}`),
+  })),
 })

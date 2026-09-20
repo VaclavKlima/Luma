@@ -1,3 +1,12 @@
+import { imageStatistics } from '../shared/statistics'
+import { resolveWhiteBalance } from './processing/white-balance'
+import {
+  renderAdjustments,
+  neutralAdjustments,
+  srgbTransform,
+  ADJUSTMENT_VERSION,
+  type WorkingFrame,
+} from '../shared/adjustments'
 import { createHash } from 'node:crypto'
 import { frameByteLength } from '../shared/preview-frame'
 import { RawGpuRenderer, GPU_RENDER_ID } from './gpu/raw-renderer'
@@ -5,10 +14,10 @@ import type { RawSource } from './gpu/raw-source'
 import { rawDecoder } from './processing/decoders'
 import { processingMetadata } from './processing/metadata'
 import type { LinearFrame } from './processing/contracts'
-import { correctionPlan, correctCpu, LENS_RENDER_VERSION } from './processing/lens-correction'
+import { correctionPlan, correctLinearCpu, LENS_RENDER_VERSION } from './processing/lens-correction'
 import type { ProcessingMetadata, ProcessingOptions } from '../shared/lens'
 import { appliedCorrections } from '../shared/lens'
-import { rm, writeFile } from 'node:fs/promises'
+import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import { ExifTool, type Tags } from 'exiftool-vendored'
@@ -33,15 +42,26 @@ const extractEmbedded: ExtractEmbedded = async (tool, path, output) => {
 export class PreviewEngine {
   private tool = new ExifTool({ maxProcs: 1, taskTimeoutMillis: 20_000 })
 
+  private working?: { key: string; frame: WorkingFrame }
   private retained?: { path: string; source?: RawSource; linear?: LinearFrame }
 
   async inspect(path: string): Promise<ProcessingMetadata> {
     if (this.tool.ended) this.tool = new ExifTool({ maxProcs: 1, taskTimeoutMillis: 20_000 })
     try {
-      return processingMetadata(
+      const metadata = processingMetadata(
         { ...(await this.tool.read(path, ['-G1', '-n']).catch(() => ({}))) },
         rawDecoder(path) ? undefined : [],
       )
+      const decoder = rawDecoder(path)
+      if (decoder) {
+        const session = await decoder.open(path)
+        try {
+          metadata.whiteBalance = resolveWhiteBalance(session.metadata)
+        } finally {
+          session.close()
+        }
+      }
+      return metadata
     } finally {
       await this.tool.end()
     }
@@ -65,6 +85,7 @@ export class PreviewEngine {
       },
       rawDecoder(path) ? undefined : [],
     )
+    if (rawDecoder(path)) processing.version = 1
     let input = sharp(path)
     let source: PreviewResult['source'] = 'image'
     let rawDimensions: { width: number; height: number } | undefined
@@ -140,23 +161,64 @@ export class PreviewEngine {
   ): Promise<FullPreviewResult> {
     const started = performance.now()
     const timings: Record<string, number> = {}
+    const workingKey = JSON.stringify([
+      path,
+      options?.metadata.lensProfile.identity,
+      options?.metadata.whiteBalance?.identity,
+      options?.settings,
+    ])
+    const adjustments = options?.adjustments ?? neutralAdjustments
+    let working = this.working?.key === workingKey ? this.working.frame : undefined
+    if (!working && options?.workingAsset) {
+      const asset = options.workingAsset
+      if (
+        asset.byteLength !== frameByteLength(asset.width, asset.height) * 4 ||
+        asset.byteLength > 512 * 1024 ** 2 ||
+        (await stat(asset.path)).size !== asset.byteLength
+      )
+        throw new Error('Invalid working preview size.')
+      const bytes = await readFile(asset.path)
+      if (
+        asset.byteLength !== frameByteLength(asset.width, asset.height) * 4 ||
+        bytes.byteLength !== asset.byteLength ||
+        createHash('sha256').update(bytes).digest('hex') !== asset.sha256
+      )
+        throw new Error('The working preview is damaged.')
+      working = {
+        data: new Float32Array(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength / 4),
+        width: asset.width,
+        height: asset.height,
+        transform: asset.transform,
+      }
+    }
     let input = sharp(path).autoOrient()
     let frame: { data: Buffer; width: number; height: number } | undefined
     let backend: 'cpu' | 'gpu' = 'cpu'
     let adapter: string | undefined
     let fallback: string | undefined
-    if (rawDecoder(path)) {
+    if (working) {
+      frame = {
+        data: Buffer.from(renderAdjustments(working.data, adjustments, working.transform)),
+        width: working.width,
+        height: working.height,
+      }
+      timings.reusedWorking = 1
+    } else if (rawDecoder(path)) {
       onStage?.('unpack')
       const applied = options && appliedCorrections(options.metadata.lensProfile, options.settings)
       const corrected = applied && Object.values(applied).some(Boolean)
       if (this.retained?.path !== path) this.releaseFrame()
-      const retained = corrected ? this.retained : undefined
+      const retained = this.retained
       const session = retained ? undefined : await rawDecoder(path)!.open(path)
       try {
         session?.unpack()
         timings.unpackMs = performance.now() - started
         const source =
           retained?.source ?? (this.backend !== 'cpu' ? session?.gpuSource() : undefined)
+        if (source)
+          source.whiteBalance =
+            options?.metadata.whiteBalance ??
+            (session ? resolveWhiteBalance(session.metadata) : undefined)
         if (this.backend !== 'cpu' && source) {
           try {
             onStage?.('gpu')
@@ -168,12 +230,18 @@ export class PreviewEngine {
                   options!.settings,
                 )
               : undefined
-            const rendered = await this.gpu.render(source, plan)
+            const rendered = await this.gpu.render(
+              source,
+              plan,
+              adjustments,
+              options?.prepareLinear,
+            )
             frame = rendered
+            working = rendered.working
             backend = 'gpu'
             adapter = rendered.adapter
             Object.assign(timings, rendered.timings)
-            if (corrected) this.retained = { path, source }
+            this.retained = { path, source }
           } catch (error) {
             fallback = error instanceof Error ? error.message : String(error)
           }
@@ -185,7 +253,17 @@ export class PreviewEngine {
           const fallbackSession =
             !session && !retained?.linear ? await rawDecoder(path)!.open(path) : undefined
           try {
-            if (corrected) {
+            if (
+              corrected ||
+              adjustments.whiteBalance?.mode === 'custom' ||
+              adjustments.exposureEv !== 0 ||
+              adjustments.contrast !== 0 ||
+              adjustments.highlights !== 0 ||
+              adjustments.shadows !== 0 ||
+              adjustments.whites !== 0 ||
+              adjustments.blacks !== 0 ||
+              options?.prepareLinear
+            ) {
               const linear = retained?.linear ?? (session ?? fallbackSession)!.linear()
               this.retained = { path, linear }
               this.gpu.releaseFrame()
@@ -196,7 +274,15 @@ export class PreviewEngine {
                 options!.settings,
               )
               const correctionStart = performance.now()
-              frame = correctCpu(linear, plan)
+              working = correctLinearCpu(linear, plan)
+              working.transform.whiteBalance =
+                options?.metadata.whiteBalance ??
+                (session ? resolveWhiteBalance(session.metadata) : undefined)
+              frame = {
+                data: Buffer.from(renderAdjustments(working.data, adjustments, working.transform)),
+                width: working.width,
+                height: working.height,
+              }
               timings.correctionMs = performance.now() - correctionStart
               timings.reusedLinear = Number(!!retained?.linear)
             } else {
@@ -215,6 +301,45 @@ export class PreviewEngine {
       }
     }
 
+    if (!frame && !rawDecoder(path)) {
+      const dimensions = await input.metadata()
+      if (frameByteLength(dimensions.width, dimensions.height) * 4 > 512 * 1024 ** 2)
+        throw new Error('This photo exceeds the floating-point preview memory limit.')
+      const { data, info } = await input
+        .toColourspace('scrgb')
+        .ensureAlpha()
+        .raw({ depth: 'float' })
+        .toBuffer({ resolveWithObject: true })
+      frameByteLength(info.width, info.height)
+      working = {
+        data: new Float32Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength / 4),
+        width: info.width,
+        height: info.height,
+        transform: srgbTransform,
+      }
+      frame = {
+        data: Buffer.from(renderAdjustments(working.data, adjustments, working.transform)),
+        width: info.width,
+        height: info.height,
+      }
+    }
+    if (working && working.data.byteLength <= 384 * 1024 ** 2) {
+      if (
+        this.retained?.linear &&
+        this.retained.linear.data.byteLength + working.data.byteLength > 384 * 1024 ** 2 &&
+        !options?.prepareLinear &&
+        !options?.workingAsset
+      ) {
+        this.working = undefined
+      } else {
+        this.working = { key: workingKey, frame: working }
+        if (
+          this.retained?.linear &&
+          this.retained.linear.data.byteLength + working.data.byteLength > 384 * 1024 ** 2
+        )
+          this.retained = undefined
+      }
+    }
     if (!frame) {
       const dimensions = await input.metadata()
       frameByteLength(dimensions.width, dimensions.height)
@@ -231,6 +356,20 @@ export class PreviewEngine {
       throw new Error('The decoder returned an incomplete pixel buffer.')
     const cacheStarted = performance.now()
     onStage?.('cache')
+    let linear: FullPreviewResult['linear']
+    if (options?.prepareLinear && working) {
+      const bytes = Buffer.from(
+        working.data.buffer,
+        working.data.byteOffset,
+        working.data.byteLength,
+      )
+      await writeFile(join(output, 'linear.f32'), bytes)
+      linear = {
+        byteLength: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        transform: working.transform,
+      }
+    }
     const sha256 = createHash('sha256').update(frame.data).digest('hex')
     await writeFile(join(output, 'full.rgba'), frame.data)
     const placeholder = await sharp(frame.data, {
@@ -244,6 +383,8 @@ export class PreviewEngine {
     timings.cacheMs = performance.now() - cacheStarted
     timings.totalMs = performance.now() - started
     return {
+      linear,
+      adjustments,
       width: frame.width,
       height: frame.height,
       format: 'rgba8-srgb',
@@ -251,6 +392,11 @@ export class PreviewEngine {
       sha256,
       renderId:
         (backend === 'gpu' ? GPU_RENDER_ID : 'libraw-ahd-srgb-cpu-1') +
+        '-' +
+        ADJUSTMENT_VERSION +
+        '-' +
+        JSON.stringify(adjustments) +
+        JSON.stringify(options?.metadata.whiteBalance?.identity ?? null) +
         (options &&
         Object.values(appliedCorrections(options.metadata.lensProfile, options.settings)).some(
           Boolean,
@@ -266,12 +412,26 @@ export class PreviewEngine {
     }
   }
 
+  async statistics(path: string, frame: { width: number; height: number; sha256: string }) {
+    const length = frameByteLength(frame.width, frame.height)
+    if ((await stat(path)).size !== length) throw new Error('Invalid statistics frame.')
+    const data = await readFile(path)
+    if (
+      data.byteLength !== length ||
+      createHash('sha256').update(data).digest('hex') !== frame.sha256
+    )
+      throw new Error('Damaged statistics frame.')
+    return imageStatistics(data)
+  }
+
   releaseFrame(): void {
+    this.working = undefined
     this.retained = undefined
     this.gpu.releaseFrame()
   }
 
   async close(): Promise<void> {
+    this.working = undefined
     this.retained = undefined
     this.gpu.close()
     await this.tool.end()

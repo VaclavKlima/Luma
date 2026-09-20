@@ -1,7 +1,8 @@
-import { test, expect } from '@playwright/test'
+import { ADJUSTMENT_VERSION, neutralAdjustments } from '../src/shared/adjustments'
+import { LibRaw } from '@colorhythm/libraw-wasm'
+import { expect, test } from '@playwright/test'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename } from 'node:path'
-import { LibRaw } from '@colorhythm/libraw-wasm'
 import sharp from 'sharp'
 import { RawGpuRenderer } from '../src/main/gpu/raw-renderer'
 import { readGpuSource, type RawSource } from '../src/main/gpu/raw-source'
@@ -187,7 +188,9 @@ test('GPU failure falls back to a complete CPU frame with its own matching place
   })
   try {
     const result = await engine.renderFull('tests/fixtures/sony-zv1.ARW', output)
-    expect(result.renderId).toBe('libraw-ahd-srgb-cpu-1')
+    expect(result.renderId).toBe(
+      `libraw-ahd-srgb-cpu-1-${ADJUSTMENT_VERSION}-${JSON.stringify(neutralAdjustments)}null`,
+    )
     expect(result.diagnostics).toMatchObject({
       backend: 'cpu',
       fallback: 'Simulated GPU device loss',
@@ -202,5 +205,126 @@ test('GPU failure falls back to a complete CPU frame with its own matching place
     expect(await readFile(`${output}/placeholder.png`)).toEqual(placeholder)
   } finally {
     await engine.close()
+  }
+})
+
+test('native GPU exposure, contrast and highlights agree with the exported linear frame without changing neutral brightness', async () => {
+  const gpu = new RawGpuRenderer()
+  const { renderAdjustments, neutralAdjustments } = await import('../src/shared/adjustments')
+  const source: RawSource = {
+    width: 64,
+    height: 32,
+    rawWidth: 64,
+    left: 0,
+    top: 0,
+    flip: 0,
+    pixels: new Uint16Array(64 * 32),
+    cfa: [0, 1, 3, 2],
+    black: [0, 0, 0, 0],
+    scale: [1, 1, 1, 1],
+    matrix: [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+  }
+  for (let y = 0; y < source.height; y++)
+    for (let x = 0; x < source.width; x++)
+      source.pixels[y * source.width + x] = x < 10 ? 0 : x < 20 ? 6000 : x < 40 ? 20000 : 60000
+  try {
+    await hardwareRender(gpu, source)
+    const neutral = await gpu.render(
+      source,
+      undefined,
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: 0 },
+      true,
+    )
+    expect(neutral.working).toBeDefined()
+    expect(neutral.working!.data.some((value) => value > 1)).toBe(true)
+    for (const ev of [-5, -1.25, 0, 1.5, 5]) {
+      for (const contrast of [-100, -35, 0, 40, 100])
+        for (const highlights of [-100, 0, 100]) {
+          const actual = await gpu.render(source, undefined, {
+            shadows: 0,
+            whites: 0,
+            blacks: 0,
+            exposureEv: ev,
+            contrast,
+            highlights,
+          })
+          const expected = renderAdjustments(
+            neutral.working!.data,
+            { shadows: 0, whites: 0, blacks: 0, exposureEv: ev, contrast, highlights },
+            neutral.working!.transform,
+          )
+          let max = 0
+          for (let i = 0; i < actual.data.length; i++)
+            max = Math.max(max, Math.abs(actual.data[i] - expected[i]))
+          expect(max).toBeLessThanOrEqual(1)
+        }
+    }
+    for (const adjustments of [
+      ...(['shadows', 'whites', 'blacks'] as const).flatMap((key) =>
+        [-100, 100].map((value) => ({ ...neutralAdjustments, [key]: value })),
+      ),
+      { exposureEv: 0.75, contrast: 35, highlights: -65, shadows: 100, whites: -80, blacks: 65 },
+      { exposureEv: -0.5, contrast: -35, highlights: 40, shadows: -100, whites: 80, blacks: -65 },
+    ]) {
+      const actual = await gpu.render(source, undefined, adjustments)
+      const expected = renderAdjustments(
+        neutral.working!.data,
+        adjustments,
+        neutral.working!.transform,
+      )
+      expect(
+        actual.data.reduce((max, value, i) => Math.max(max, Math.abs(value - expected[i])), 0),
+      ).toBeLessThanOrEqual(1)
+    }
+  } finally {
+    gpu.close()
+  }
+})
+
+test('Sony RAW native highlights and combined exposure/contrast match CPU conversion of the neutral working frame', async () => {
+  test.setTimeout(90000)
+  const { rawDecoder } = await import('../src/main/processing/decoders')
+  const { renderAdjustments, neutralAdjustments } = await import('../src/shared/adjustments')
+  const session = await rawDecoder('tests/fixtures/sony-zv1.ARW')!.open(
+    'tests/fixtures/sony-zv1.ARW',
+  )
+  const gpu = new RawGpuRenderer()
+  try {
+    session.unpack()
+    const source = session.gpuSource()!
+    await hardwareRender(gpu, source)
+    const neutral = await gpu.render(
+      source,
+      undefined,
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: 0 },
+      true,
+    )
+    for (const adjustments of [
+      ...(['shadows', 'whites', 'blacks'] as const).flatMap((key) =>
+        [-100, 100].map((value) => ({ ...neutralAdjustments, [key]: value })),
+      ),
+      { exposureEv: 0.75, contrast: 35, highlights: -65, shadows: 80, whites: -40, blacks: 25 },
+      { exposureEv: -0.5, contrast: -35, highlights: 40, shadows: -80, whites: 60, blacks: -30 },
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: -100, highlights: 0 },
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: -1.25, contrast: 100, highlights: 0 },
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: -100 },
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: 0.75, contrast: 35, highlights: 100 },
+      { shadows: 0, whites: 0, blacks: 0, exposureEv: 1.25, contrast: -40, highlights: -65 },
+    ]) {
+      const actual = await gpu.render(source, undefined, adjustments)
+      const expected = renderAdjustments(
+        neutral.working!.data,
+        adjustments,
+        neutral.working!.transform,
+      )
+      let max = 0
+      for (let i = 0; i < expected.length; i++)
+        max = Math.max(max, Math.abs(expected[i] - actual.data[i]))
+      expect(max).toBeLessThanOrEqual(1)
+      expect(actual.timings.reusedLinear).toBe(1)
+    }
+  } finally {
+    session.close()
+    gpu.close()
   }
 })

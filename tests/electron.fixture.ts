@@ -1,9 +1,9 @@
+import type { ElectronApplication, Page } from '@playwright/test'
+import { test as base, _electron as electron, expect } from '@playwright/test'
 import type { ChildProcess } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { _electron as electron, expect, test as base } from '@playwright/test'
-import type { ElectronApplication, Page } from '@playwright/test'
 
 interface DesktopWindow {
   app: ElectronApplication
@@ -102,8 +102,13 @@ export const test = base.extend<{ luma: DesktopSession }>({
       }
       app.on('window', observePage)
       app.windows().forEach(observePage)
-      await app.context().tracing.start({ screenshots: true, snapshots: true, sources: true })
-      running.tracing = true
+      expect(await realpath(await app.evaluate(({ app }) => app.getPath('userData')))).toBe(
+        await realpath(userDataDir),
+      )
+      if (process.env.LUMA_TEST_TRACE === '1') {
+        await app.context().tracing.start({ screenshots: true, snapshots: true, sources: true })
+        running.tracing = true
+      }
       const page = await app.firstWindow()
       observePage(page)
       await expect(page.getByTestId('workspace')).toBeVisible()
@@ -119,8 +124,10 @@ export const test = base.extend<{ luma: DesktopSession }>({
         expectQuit: async (action) => {
           const running = applications[applications.length - 1]
           running.closing = true
-          await running.app.context().tracing.stop({ path: running.tracePath })
-          running.tracing = false
+          if (running.tracing) {
+            await running.app.context().tracing.stop({ path: running.tracePath })
+            running.tracing = false
+          }
           const closed = running.app.waitForEvent('close')
           await action()
           await closed
@@ -147,7 +154,7 @@ export const test = base.extend<{ luma: DesktopSession }>({
       }
       failed = failed || errors.length > 0
       for (const running of applications) {
-        if (failed) {
+        if (failed && process.env.LUMA_TEST_TRACE === '1') {
           await testInfo
             .attach('Electron trace', { path: running.tracePath, contentType: 'application/zip' })
             .catch(() => undefined)
@@ -162,6 +169,7 @@ export const test = base.extend<{ luma: DesktopSession }>({
         })
       }
       await rm(userDataDir, { recursive: true, force: true })
+      await expect(access(userDataDir)).rejects.toThrow()
       expect(errors, 'Electron must finish without main-process or renderer errors').toEqual([])
     }
   },

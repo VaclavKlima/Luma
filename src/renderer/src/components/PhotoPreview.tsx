@@ -1,3 +1,9 @@
+import { neutralAdjustments } from '../../../shared/adjustments'
+import type { PreviewTools } from '../hooks/usePreviewTools'
+import { usePreviewAnalysis, type ClippingMask } from '../hooks/usePreviewAnalysis'
+import type { AdjustmentParameters } from '../../../shared/adjustments'
+import { PreviewPresenter } from '../preview/presenter'
+import { useWorkingPreview } from '../hooks/useWorkingPreview'
 import {
   useCallback,
   useEffect,
@@ -32,6 +38,10 @@ interface Model {
   view: View
 }
 interface Props {
+  tools: PreviewTools
+  gesturing: boolean
+  adjustments: AdjustmentParameters
+  onEditingReady: (photoId: string | null) => void
   photo: Photo | null
   total: number
   position: number
@@ -43,14 +53,31 @@ interface Props {
 // The parent keys this component by photo ID so every new photograph starts in Fit.
 export function PhotoPreview({
   photo,
+  adjustments,
+  tools,
+  gesturing,
+  onEditingReady,
   total,
   position,
   onNavigate,
   onImport,
   onContextMenu,
 }: Props) {
+  const overlay = useRef<HTMLCanvasElement>(null)
+  const divider = useRef<HTMLDivElement>(null)
+  const dividerPointer = useRef<number | null>(null)
+  const [mask, setMask] = useState<ClippingMask>()
   const viewport = useRef<HTMLDivElement>(null)
   const image = useRef<HTMLCanvasElement>(null)
+  const restoreCanvasFocus = useRef(false)
+  const attachCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
+    if (!canvas) restoreCanvasFocus.current = document.activeElement === image.current
+    image.current = canvas
+    if (canvas && restoreCanvasFocus.current) {
+      canvas.focus({ preventScroll: true })
+      restoreCanvasFocus.current = false
+    }
+  }, [])
   const [model, setModel] = useState<Model>({
     loaded: false,
     image: { width: photo?.width ?? 0, height: photo?.height ?? 0 },
@@ -60,7 +87,27 @@ export function PhotoPreview({
   const current = useRef(model)
   const full = useFullPreview(photo?.id)
   const [displayedUrl, setDisplayedUrl] = useState('')
-  const fullVisible = Boolean(full.preview && displayedUrl === full.preview.url)
+  const [fallback, setFallback] = useState(false)
+  const presenter = useRef<PreviewPresenter | null>(null)
+  const fullVisible = Boolean(full.preview && displayedUrl)
+  const live = useWorkingPreview(full.preview, fullVisible)
+  const { working, generation } = live
+  const { mode, split, analyze, update } = tools
+  const shadows = tools.shadows || tools.hover === 'shadows'
+  const highlights = tools.highlights || tools.hover === 'highlights'
+  usePreviewAnalysis(
+    working,
+    `${photo?.id}-${working?.identity ?? 'pending'}-${generation}`,
+    mode === 'before' ? neutralAdjustments : adjustments,
+    shadows || highlights,
+    gesturing,
+    analyze,
+    setMask,
+  )
+  useEffect(() => {
+    if (gesturing && mode === 'before') update({ mode: 'after' })
+  }, [gesturing, mode, update])
+  const editingSurface = !!working
   const placeholderView = constrain(model.view, full.placeholder ?? model.image, model.viewport)
   const [dragging, setDragging] = useState(false)
   const drag = useRef<{ id: number; x: number; y: number; moved: boolean } | null>(null)
@@ -85,6 +132,12 @@ export function PhotoPreview({
   const minimum = minimumScale(model.image, model.viewport)
 
   const stopDrag = useCallback(() => {
+    if (
+      dividerPointer.current !== null &&
+      divider.current?.hasPointerCapture(dividerPointer.current)
+    )
+      divider.current.releasePointerCapture(dividerPointer.current)
+    dividerPointer.current = null
     const pointer = drag.current
     drag.current = null
     if (pointer) {
@@ -144,40 +197,159 @@ export function PhotoPreview({
   }, [change, stopDrag])
 
   const { preview: renderedFrame, pixels, displayFailed } = full
-  const displayCanvas = useCallback(
-    (canvas: HTMLCanvasElement | null) => {
-      image.current = canvas
-      if (!canvas || !renderedFrame || !pixels) return
-      try {
-        const context = canvas.getContext('2d', { colorSpace: 'srgb' })
-        if (!context) throw new Error('Canvas is unavailable')
-        canvas.width = renderedFrame.width
-        canvas.height = renderedFrame.height
-        context.drawImage(pixels, 0, 0)
-        const dimensions = { width: canvas.width, height: canvas.height }
-        setDisplayedUrl(renderedFrame.url)
-        change((model) => ({
-          ...model,
-          loaded: true,
-          image: dimensions,
-          view: replaceDimensions(model.view, model.image, dimensions, model.viewport),
-        }))
-      } catch {
-        displayFailed()
-      }
-    },
-    [renderedFrame, pixels, change, displayFailed],
-  )
-
   useEffect(() => {
     const canvas = image.current
-    return () => {
-      if (canvas) {
-        canvas.width = 0
-        canvas.height = 0
-      }
+    if (!canvas) return
+    try {
+      presenter.current = new PreviewPresenter(canvas, fallback || !editingSurface, () =>
+        setFallback(true),
+      )
+    } catch {
+      // Canvas capability checks can require replacing the DOM canvas with a 2D surface.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFallback(true)
     }
-  }, [])
+    return () => {
+      presenter.current?.dispose()
+      presenter.current = null
+    }
+  }, [fallback, generation, editingSurface])
+
+  useEffect(() => {
+    if (!renderedFrame || !pixels || !presenter.current) return
+    try {
+      if (!editingSurface || fallback) presenter.current.setBitmap(pixels)
+      const dimensions = { width: renderedFrame.width, height: renderedFrame.height }
+      // The decoded frame establishes authoritative dimensions after presentation upload.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDisplayedUrl(renderedFrame.url)
+      change((model) => ({
+        ...model,
+        loaded: true,
+        image: dimensions,
+        view: replaceDimensions(model.view, model.image, dimensions, model.viewport),
+      }))
+    } catch {
+      if (!fallback) setFallback(true)
+      else displayFailed()
+    }
+  }, [renderedFrame, pixels, change, displayFailed, fallback, generation, editingSurface])
+
+  useEffect(() => {
+    try {
+      if (working) presenter.current?.setWorking(working)
+      onEditingReady(working ? (photo?.id ?? null) : null)
+    } catch {
+      // Canvas capability checks can require replacing the DOM canvas with a 2D surface.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFallback(true)
+    }
+    return () => onEditingReady(null)
+  }, [working, fallback, generation, photo?.id, onEditingReady])
+
+  useEffect(() => {
+    const started = performance.now()
+    const id = requestAnimationFrame(() => {
+      presenter.current?.setComparison(mode, split)
+      presenter.current?.draw(model.image, model.viewport, model.view, {
+        whiteBalance: adjustments.whiteBalance,
+        exposureEv: adjustments.exposureEv,
+        contrast: adjustments.contrast,
+        highlights: adjustments.highlights,
+        shadows: adjustments.shadows,
+        whites: adjustments.whites,
+        blacks: adjustments.blacks,
+      })
+      performance.measure('luma.preview.presentation', {
+        start: started,
+        detail: {
+          exposureEv: adjustments.exposureEv,
+          contrast: adjustments.contrast,
+          highlights: adjustments.highlights,
+          shadows: adjustments.shadows,
+          whites: adjustments.whites,
+          blacks: adjustments.blacks,
+          scale: model.view.scale,
+        },
+      })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [
+    model,
+    adjustments.exposureEv,
+    adjustments.contrast,
+    adjustments.highlights,
+    adjustments.shadows,
+    adjustments.whites,
+    adjustments.blacks,
+    adjustments.whiteBalance,
+    mode,
+    split,
+    working,
+    fallback,
+    generation,
+  ])
+
+  useEffect(() => {
+    const canvas = overlay.current,
+      context = canvas?.getContext('2d')
+    if (!canvas || !context) return
+    canvas.width = Math.max(1, Math.round(model.viewport.width))
+    canvas.height = Math.max(1, Math.round(model.viewport.height))
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    if (!mask || !working) return
+    const { image, viewport, view } = model
+    let levelIndex = 0
+    while (levelIndex + 1 < mask.levels.length && view.scale * 2 ** levelIndex < 1) levelIndex++
+    const level = mask.levels[levelIndex]
+    const left = (viewport.width - image.width * view.scale) / 2 + view.x,
+      top = (viewport.height - image.height * view.scale) / 2 + view.y
+    const pixelWidth = (image.width * view.scale) / level.width,
+      pixelHeight = (image.height * view.scale) / level.height
+    const sx = Math.max(0, Math.floor(-left / pixelWidth)),
+      sy = Math.max(0, Math.floor(-top / pixelHeight))
+    const width = Math.max(
+      0,
+      Math.min(level.width, Math.ceil((viewport.width - left) / pixelWidth)) - sx,
+    )
+    const height = Math.max(
+      0,
+      Math.min(level.height, Math.ceil((viewport.height - top) / pixelHeight)) - sy,
+    )
+    if (!width || !height) return
+    const compact = document.createElement('canvas')
+    compact.width = width
+    compact.height = height
+    const pixels = new Uint8ClampedArray(width * height * 4)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const bits = level.data[(sy + y) * level.width + sx + x],
+          i = (y * width + x) * 4
+        if (highlights && bits & 2) {
+          pixels[i] = 255
+          pixels[i + 3] = 180
+        } else if (shadows && bits & 1) {
+          pixels[i + 2] = 255
+          pixels[i + 3] = 180
+        }
+      }
+    compact.getContext('2d')!.putImageData(new ImageData(pixels, width, height), 0, 0)
+    context.save()
+    if (mode === 'split') {
+      context.beginPath()
+      context.rect(canvas.width * split, 0, canvas.width, canvas.height)
+      context.clip()
+    }
+    context.imageSmoothingEnabled = false
+    context.drawImage(
+      compact,
+      left + sx * pixelWidth,
+      top + sy * pixelHeight,
+      width * pixelWidth,
+      height * pixelHeight,
+    )
+    context.restore()
+  }, [mask, model, mode, split, shadows, highlights, working])
 
   function fit() {
     stopDrag()
@@ -219,7 +391,15 @@ export function PhotoPreview({
       return
     }
     if (!ready || event.ctrlKey || event.metaKey || event.altKey) return
-    if (event.key === '+' || event.key === '=') step(1)
+    if (working && event.key === '\\') update({ mode: mode === 'before' ? 'after' : 'before' })
+    else if (working && event.key.toLowerCase() === 'y')
+      update({ mode: mode === 'split' ? 'after' : 'split' })
+    else if (working && event.key.toLowerCase() === 'j')
+      update({
+        shadows: !(tools.shadows && tools.highlights),
+        highlights: !(tools.shadows && tools.highlights),
+      })
+    else if (event.key === '+' || event.key === '=') step(1)
     else if (event.key === '-') step(-1)
     else if (event.key === '0') fit()
     else if (event.key === '1') zoom(1)
@@ -321,8 +501,9 @@ export function PhotoPreview({
           {photo ? (
             <>
               <canvas
-                ref={displayCanvas}
-                className={styles.image}
+                key={`${fallback}-${generation}-${editingSurface}`}
+                ref={attachCanvas}
+                className={styles.canvas}
                 role="img"
                 aria-label={photo.filename}
                 data-testid="main-preview"
@@ -330,12 +511,78 @@ export function PhotoPreview({
                 tabIndex={0}
                 aria-keyshortcuts="+ - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown"
                 style={{
-                  width: model.image.width || undefined,
-                  height: model.image.height || undefined,
+                  width: model.viewport.width || undefined,
+                  height: model.viewport.height || undefined,
                   visibility: fullVisible && ready ? 'visible' : 'hidden',
-                  transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
                 }}
               />
+              <canvas
+                ref={overlay}
+                className={styles.overlay}
+                aria-hidden="true"
+                data-testid="clipping-overlay"
+              />
+              {working && mode !== 'after' && <span className={styles.beforeLabel}>Before</span>}
+              {working && mode === 'split' && (
+                <>
+                  <span className={styles.afterLabel}>After</span>
+                  <div
+                    ref={divider}
+                    className={styles.divider}
+                    style={{ left: `${split * 100}%` }}
+                    role="slider"
+                    tabIndex={0}
+                    aria-label="Before and After divider"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(split * 100)}
+                    aria-orientation="horizontal"
+                    onPointerDown={(event) => {
+                      event.stopPropagation()
+                      event.preventDefault()
+                      event.currentTarget.focus()
+                      dividerPointer.current = event.pointerId
+                      event.currentTarget.setPointerCapture(event.pointerId)
+                    }}
+                    onPointerMove={(event) => {
+                      event.stopPropagation()
+                      if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+                      const box = viewport.current!.getBoundingClientRect()
+                      update({
+                        split: Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)),
+                      })
+                    }}
+                    onPointerUp={(event) => {
+                      event.stopPropagation()
+                      if (event.currentTarget.hasPointerCapture(event.pointerId))
+                        event.currentTarget.releasePointerCapture(event.pointerId)
+                    }}
+                    onPointerCancel={(event) => {
+                      event.stopPropagation()
+                      if (event.currentTarget.hasPointerCapture(event.pointerId))
+                        event.currentTarget.releasePointerCapture(event.pointerId)
+                    }}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                      event.stopPropagation()
+                      if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+                        event.preventDefault()
+                        update({
+                          split:
+                            event.key === 'Home'
+                              ? 0
+                              : event.key === 'End'
+                                ? 1
+                                : Math.max(
+                                    0,
+                                    Math.min(1, split + (event.key === 'ArrowLeft' ? -0.01 : 0.01)),
+                                  ),
+                        })
+                      }
+                    }}
+                  />
+                </>
+              )}
               {!fullVisible && full.placeholder?.placeholderUrl && (
                 <img
                   className={`${styles.image} ${styles.placeholder}`}
@@ -400,7 +647,16 @@ export function PhotoPreview({
                   <button onClick={full.retry}>Retry</button>
                 </>
               ) : fullVisible ? (
-                'Full resolution'
+                live.error ? (
+                  <>
+                    <span>{live.error}</span>
+                    <button onClick={live.retry}>Retry live preview</button>
+                  </>
+                ) : working ? (
+                  'Full resolution'
+                ) : (
+                  'Preparing live preview…'
+                )
               ) : (
                 <>
                   <ProgressSpinner />
@@ -465,7 +721,11 @@ export function PhotoPreview({
               </option>
             ))}
           </select>
-          <button aria-label="Zoom in" disabled={!ready || view.scale >= 4} onClick={() => step(1)}>
+          <button
+            aria-label="Zoom in"
+            disabled={!ready || view.scale >= 32}
+            onClick={() => step(1)}
+          >
             <Plus size={13} />
           </button>
           <button aria-label="Fit preview" title="Fit preview (0)" disabled={!ready} onClick={fit}>

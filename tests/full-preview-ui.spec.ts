@@ -1,6 +1,6 @@
-import type { ElectronApplication } from '@playwright/test'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { PREVIEW_VERSION } from '../src/main/full-previews'
 import { expect, test } from './electron.fixture'
 import { importPhotos } from './import.helpers'
 
@@ -46,7 +46,7 @@ test('opens cached photos with only a matching blurred placeholder, including af
     const placeholder = page.getByTestId('preview-placeholder')
     await expect(placeholder).toBeVisible()
     const placeholderUrl = (await placeholder.getAttribute('src'))!
-    expect(placeholderUrl).toContain('/placeholder/v3/')
+    expect(placeholderUrl).toContain(`/placeholder/${PREVIEW_VERSION}/`)
     await expect(page.getByTestId('main-preview')).not.toBeVisible()
     await expect(viewport.locator('img[src*="/preview"]')).toHaveCount(0)
     await page.evaluate(() => (window as unknown as { releaseFrame: () => void }).releaseFrame())
@@ -62,63 +62,7 @@ test('opens cached photos with only a matching blurred placeholder, including af
 })
 
 // Delay the trusted handler, keeping actual cache, worker and protocol behavior behind the gate.
-async function holdFullPreview(app: ElectronApplication) {
-  return app.evaluateHandle(({ ipcMain }) => {
-    const handlers = (
-      ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
-    )._invokeHandlers
-    const original = handlers.get('preview:request')!
-    let release!: () => void
-    let failure = false
-    const pending = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    ipcMain.removeHandler('preview:request')
-    ipcMain.handle('preview:request', async (...args) => {
-      await pending
-      return failure ? { error: 'Preview generation timed out.' } : original(...args)
-    })
-    return {
-      release: () => release(),
-      fail: () => {
-        failure = true
-      },
-      succeed: () => {
-        failure = false
-      },
-    }
-  })
-}
-
-test('shows a neutral loader on first RAW opening and then native full-resolution pixels', async ({
-  luma,
-}, info) => {
-  const { app, page } = luma
-  const gate = await holdFullPreview(app)
-  try {
-    await importPhotos(app, page, ['tests/fixtures/sony-zv1.ARW'], false)
-    const viewport = page.getByTestId('preview-viewport')
-    const zoom = page.getByRole('combobox', { name: 'Preview zoom' })
-    await expect(page.getByTestId('preview-resolution')).toContainText('Loading full resolution…')
-    await expect(viewport).toHaveAttribute('data-resolution', 'loading')
-    await expect(zoom).toBeDisabled()
-    await expect(viewport.locator('img')).toHaveCount(0)
-    await page.screenshot({ path: info.outputPath('raw-loading.png') })
-    await gate.evaluate((control) => control.release())
-    await expect(viewport).toHaveAttribute('data-resolution', 'full', { timeout: 20000 })
-    await zoom.selectOption('1')
-    const dimensions = await page.getByTestId('main-preview').evaluate((element) => ({
-      width: (element as HTMLCanvasElement).width,
-      height: (element as HTMLCanvasElement).height,
-      displayed: element.getBoundingClientRect().width,
-    }))
-    expect(dimensions).toEqual({ width: 5422, height: 3622, displayed: 5422 })
-    await page.screenshot({ path: info.outputPath('raw-full-100.png') })
-  } finally {
-    await gate.evaluate((control) => control.release())
-    await gate.dispose()
-  }
-})
+import { holdFullPreview } from './full-preview.helpers'
 
 test('shows an error without camera JPEG fallback, retries, and repairs corrupt RGBA frames', async ({
   luma,

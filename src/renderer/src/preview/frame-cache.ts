@@ -21,16 +21,34 @@ function key(preview: FullPreview) {
   return `${preview.url}:${preview.renderId}:${preview.sha256}`
 }
 export class BitmapCache {
+  private reserved = 0
   private entries = new Map<string, Entry>()
   constructor(private budget = 256 * 1024 * 1024) {}
   private prune() {
-    let bytes = [...this.entries.values()].reduce((sum, entry) => sum + entry.bytes, 0)
+    let bytes =
+      this.reserved + [...this.entries.values()].reduce((sum, entry) => sum + entry.bytes, 0)
     for (const [key, entry] of this.entries) {
       if (bytes <= this.budget) break
       if (entry.pins) continue
       this.entries.delete(key)
       bytes -= entry.bytes
       entry.bitmap.close()
+    }
+  }
+  retain(bitmap: ImageBitmap): (() => void) | undefined {
+    const entry = [...this.entries.values()].find((entry) => entry.bitmap === bitmap)
+    return entry ? this.lease(entry).release : undefined
+  }
+  reserve(bytes: number): () => void {
+    this.reserved += bytes
+    this.prune()
+    let released = false
+    return () => {
+      if (!released) {
+        released = true
+        this.reserved -= bytes
+        this.prune()
+      }
     }
   }
   private lease(entry: Entry): FrameLease {
@@ -70,6 +88,8 @@ export class BitmapCache {
   }
 }
 const frames = new BitmapCache()
+export const retainPresentationBitmap = (bitmap: ImageBitmap) => frames.retain(bitmap)
+export const reservePresentationBitmaps = (bytes: number) => frames.reserve(bytes)
 export function cachedFrame(preview: FullPreview): FrameLease | null {
   return frames.acquire(preview)
 }

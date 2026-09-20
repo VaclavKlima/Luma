@@ -6,3 +6,13 @@ args = ["run", "--silent", "mcp:ui"]
 cwd = "/absolute/path/to/Luma"
 startup_timeout_sec = 30
 tool_timeout_sec = 60
+
+# Editing server for a normally running Luma instance; CDP is not required.
+[mcp_servers.luma_editor]
+command = "npm"
+args = ["run", "--silent", "mcp:editor"]
+cwd = "/absolute/path/to/Luma"
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+# For isolated-profile testing, uncomment and set the same profile as Electron:
+# env = { LUMA_PROFILE = "/absolute/test/profile" }

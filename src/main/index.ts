@@ -1,3 +1,5 @@
+import { startEditorEndpoint } from './editor-endpoint'
+import { randomUUID } from 'node:crypto'
 import { photoExtensions } from './processing/formats'
 import {
   app,
@@ -22,6 +24,7 @@ app.setName('Luma')
 
 let mainWindow: BrowserWindow | null = null
 let library: PhotoLibrary | undefined
+let editorEndpoint: Awaited<ReturnType<typeof startEditorEndpoint>> | undefined
 let quitting = false
 let picking = false
 let quitPending = false
@@ -46,13 +49,40 @@ async function requestQuit(): Promise<void> {
         : await dialog.showMessageBox(options)
       if (result.response !== 1) return
     }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const window = mainWindow
+      await new Promise<void>((resolve, reject) => {
+        const token = randomUUID()
+        const timer = setTimeout(() => {
+          ipcMain.removeListener('edits:flushed', handler)
+          reject(new Error('The editor did not finish saving. Try closing again.'))
+        }, 10000)
+        const handler = (event: Electron.IpcMainEvent, returned: string, error?: string) => {
+          if (
+            event.sender !== window.webContents ||
+            event.senderFrame !== window.webContents.mainFrame ||
+            returned !== token
+          )
+            return
+          clearTimeout(timer)
+          ipcMain.removeListener('edits:flushed', handler)
+          if (error) reject(new Error(error))
+          else resolve()
+        }
+        ipcMain.on('edits:flushed', handler)
+        window.webContents.send('edits:flush', token)
+      })
+    }
     quitting = true
+    await editorEndpoint?.close()
     await library?.close()
     app.quit()
   } catch (error) {
-    console.error('Could not finish application cleanup:', error)
-    quitting = true
-    app.quit()
+    await dialog.showMessageBox({
+      type: 'error',
+      message: 'Could not finish saving',
+      detail: String(error),
+    })
   } finally {
     quitPending = false
   }
@@ -117,7 +147,7 @@ function createWindow(): void {
   window.webContents.session.setPermissionCheckHandler(() => false)
   window.once('ready-to-show', () => window.show())
   window.on('close', (event) => {
-    if (!quitting && library?.hasActiveTask()) {
+    if (!quitting) {
       event.preventDefault()
       void requestQuit()
     }
@@ -172,6 +202,7 @@ app
       (path) => shell.trashItem(path),
     )
     await library.open()
+    editorEndpoint = await startEditorEndpoint(app.getPath('userData'), library)
     protocol.handle('luma-photo', async (request) => {
       if (request.method !== 'GET') return new Response(null, { status: 404 })
       const asset = library?.fullPreviews.acquire(new URL(request.url))
@@ -203,6 +234,33 @@ app
         return new Response(null, { status: 404 })
       }
     })
+    ipcMain.handle('statistics:get', (event, id: string, revision: number) => {
+      trusted(event)
+      return library!.getPhotoStatistics(id, revision).then(
+        (statistics) => ({ statistics }),
+        (error) => ({ error: String(error) }),
+      )
+    })
+    ipcMain.handle('edits:get', (event, id) => {
+      trusted(event)
+      return library!.getEdits(id)
+    })
+    ipcMain.handle('edits:update', (event, id, patch, revision) => {
+      trusted(event)
+      return library!.updateEdits(id, patch, revision)
+    })
+    ipcMain.handle('edits:history', (event, id) => {
+      trusted(event)
+      return library!.getEditHistory(id)
+    })
+    ipcMain.handle('edits:undo', (event, id, revision) => {
+      trusted(event)
+      return library!.undoEdit(id, revision)
+    })
+    ipcMain.handle('edits:redo', (event, id, revision) => {
+      trusted(event)
+      return library!.redoEdit(id, revision)
+    })
     ipcMain.handle('lens:get', (event, id) => {
       trusted(event)
       return library!.getLensSettings(id)
@@ -221,6 +279,13 @@ app
       return library!.fullPreviews.request(id, token, regenerate).then(
         (preview) => ({ preview }),
         (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+      )
+    })
+    ipcMain.handle('preview:editing', (event, id, token) => {
+      trusted(event)
+      return library!.fullPreviews.requestEditing(id, token).then(
+        (preview) => ({ preview }),
+        (error: unknown) => ({ error: String(error) }),
       )
     })
     ipcMain.handle('preview:cached', (event, id: string, token: string) => {

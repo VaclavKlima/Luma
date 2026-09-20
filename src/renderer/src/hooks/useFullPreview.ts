@@ -12,15 +12,22 @@ const empty: State = { preview: null, pixels: null, placeholder: null, error: nu
 
 export function useFullPreview(photoId: string | undefined) {
   const latestRevision = useRef(0)
+  const displayedLease = useRef<FrameLease | null>(null)
+  useEffect(
+    () => () => {
+      displayedLease.current?.release()
+    },
+    [],
+  )
   const regenerateRevision = useRef(0)
   const [revision, setRevision] = useState(0)
   useEffect(
     () =>
       window.luma.onLibraryEvent((event) => {
-        if (event.lensChanged && event.lensChanged.photoId === photoId) {
-          latestRevision.current = event.lensChanged.revision
-          setRevision(event.lensChanged.revision)
-          setState(empty)
+        if (event.editsChanged && event.editsChanged.photoId === photoId) {
+          latestRevision.current = event.editsChanged.revision
+          setRevision(event.editsChanged.revision)
+          if (event.lensChanged) setState(empty)
         }
       }),
     [photoId],
@@ -49,20 +56,24 @@ export function useFullPreview(photoId: string | undefined) {
         frame = cachedFrame(preview) ?? undefined
         if (!frame) {
           // The placeholder and frame share the exact rendering revision.
-          setState({ ...empty, placeholder: preview })
+          setState((previous) => (previous.pixels ? previous : { ...empty, placeholder: preview }))
           frame = await loadFrame(preview, abort.signal)
         }
         if (cancelled || (preview.settingsRevision ?? 0) < latestRevision.current) {
           frame.release()
           return
         }
+        displayedLease.current?.release()
+        displayedLease.current = frame
         setState({ preview, pixels: frame.bitmap, placeholder: null, error: null })
         performance.measure('luma.full-preview.load', {
           start: started,
           detail: { photoId, renderId: preview.renderId },
         })
       } catch (error) {
-        if (!cancelled) {
+        // An edit can cancel main-process work before React cleans up this effect.
+        // A superseded request must not replace the working preview with an error.
+        if (!cancelled && revision >= latestRevision.current) {
           setState((state) => ({
             ...state,
             preview: null,
@@ -76,7 +87,7 @@ export function useFullPreview(photoId: string | undefined) {
     return () => {
       cancelled = true
       abort.abort()
-      frame?.release()
+      if (frame && frame !== displayedLease.current) frame.release()
       void window.luma.releaseFullPreview(requestId).catch(() => undefined)
     }
   }, [photoId, attempt, revision])

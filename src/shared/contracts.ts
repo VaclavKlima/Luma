@@ -1,3 +1,7 @@
+import type { PhotoStatistics } from './statistics'
+import type { AdjustmentParameters } from './adjustments'
+import type { DisplayTransform } from './adjustments'
+import type { EditState, EditPatch, EditHistory } from './edits'
 import type { CorrectionKind, LensSettings, LensState } from './lens'
 export interface AppInfo {
   version: string
@@ -5,12 +9,20 @@ export interface AppInfo {
 }
 
 export interface LumaApi {
+  onFlushEdits(listener: () => Promise<void>): () => void
+  getPhotoStatistics(photoId: string, expectedRevision: number): Promise<PhotoStatistics>
+  getEdits(photoId: string): Promise<EditState>
+  updateEdits(photoId: string, patch: EditPatch, expectedRevision: number): Promise<EditState>
+  getEditHistory(photoId: string): Promise<EditHistory>
+  undoEdit(photoId: string, expectedRevision: number): Promise<EditState>
+  redoEdit(photoId: string, expectedRevision: number): Promise<EditState>
   getLensSettings(photoId: string): Promise<LensState>
   updateLensSettings(photoId: string, kind: CorrectionKind, enabled: boolean): Promise<LensState>
   getAppInfo(): Promise<AppInfo>
   listPhotos(offset?: number): Promise<PhotoPage>
   locatePhoto(id: string, direction?: -1 | 0 | 1): Promise<PhotoLocation | null>
   getPhotoRange(fromId: string, toId: string): Promise<PhotoReference[]>
+  requestEditingPreview(photoId: string, requestId: string): Promise<FullPreview>
   requestFullPreview(photoId: string, requestId: string, regenerate?: boolean): Promise<FullPreview>
   requestCachedFullPreview(photoId: string, requestId: string): Promise<FullPreview | null>
   releaseFullPreview(requestId: string): Promise<void>
@@ -51,7 +63,15 @@ export interface Photo extends PhotoMetadata {
   previewSource: 'image' | 'embedded' | 'decoded'
 }
 
+export interface LinearAsset {
+  url?: string
+  byteLength: number
+  sha256: string
+  transform: DisplayTransform
+}
 export interface FullPreview {
+  adjustments?: AdjustmentParameters
+  linear?: LinearAsset
   settingsRevision?: number
   appliedCorrections?: LensSettings
   photoId: string
@@ -124,6 +144,7 @@ export interface ImportReview {
 }
 
 export interface LibraryEvent {
+  editsChanged?: { photoId: string; revision: number }
   lensChanged?: { photoId: string; revision: number }
   sessionId?: string
   libraryChanged?: boolean

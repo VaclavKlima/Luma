@@ -8,7 +8,7 @@ export interface View {
   x: number
   y: number
 }
-export const ZOOM_STOPS = [0.1, 0.25, 0.5, 1, 2, 4]
+export const ZOOM_STOPS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32]
 export const INITIAL_VIEW: View = { fit: true, scale: 1, x: 0, y: 0 }
 
 export function fitScale(image: Size, viewport: Size): number {
@@ -32,7 +32,7 @@ export function replaceDimensions(view: View, before: Size, after: Size, viewpor
 }
 export function constrain(view: View, image: Size, viewport: Size): View {
   if (view.fit) return { fit: true, scale: fitScale(image, viewport), x: 0, y: 0 }
-  const scale = Math.max(minimumScale(image, viewport), Math.min(4, view.scale))
+  const scale = Math.max(minimumScale(image, viewport), Math.min(32, view.scale))
   const limitX = Math.max(0, (image.width * scale - viewport.width) / 2)
   const limitY = Math.max(0, (image.height * scale - viewport.height) / 2)
   return {
@@ -50,7 +50,7 @@ export function zoomAt(
   image: Size,
   viewport: Size,
 ): View {
-  const nextScale = Math.max(minimumScale(image, viewport), Math.min(4, scale))
+  const nextScale = Math.max(minimumScale(image, viewport), Math.min(32, scale))
   const ratio = nextScale / view.scale
   return constrain(
     {
@@ -65,7 +65,7 @@ export function zoomAt(
 }
 export function stepScale(scale: number, direction: -1 | 1, minimum: number): number {
   return direction > 0
-    ? (ZOOM_STOPS.find((stop) => stop > scale + 0.00001) ?? 4)
+    ? (ZOOM_STOPS.find((stop) => stop > scale + 0.00001) ?? 32)
     : ([...ZOOM_STOPS].reverse().find((stop) => stop < scale - 0.00001) ?? minimum)
 }
 export function wheelScale(

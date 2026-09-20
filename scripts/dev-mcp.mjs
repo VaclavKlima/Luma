@@ -22,12 +22,16 @@ try {
 const cli = fileURLToPath(
   new URL('../node_modules/electron-vite/bin/electron-vite.js', import.meta.url),
 )
-const child = spawn(process.execPath, [cli, 'dev', '--remote-debugging-port=9222'], {
-  stdio: 'inherit',
-  cwd: fileURLToPath(new URL('..', import.meta.url)),
-  // Own the whole Vite/Electron process group so programmatic shutdown is reliable.
-  detached: process.platform !== 'win32',
-})
+const child = spawn(
+  process.execPath,
+  [cli, 'dev', '--remote-debugging-port=9222', ...process.argv.slice(2)],
+  {
+    stdio: 'inherit',
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    // Own the whole Vite/Electron process group so programmatic shutdown is reliable.
+    detached: process.platform !== 'win32',
+  },
+)
 let stopping = false
 
 function stopTree(signal = 'SIGTERM') {

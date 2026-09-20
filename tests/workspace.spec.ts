@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises'
 import type { ElectronApplication, Locator, Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 import type { LumaApi } from '../src/shared/contracts'
 import { expect, test } from './electron.fixture'
 import { importPhotos } from './import.helpers'
@@ -18,15 +18,18 @@ async function resizeWindow(app: ElectronApplication, page: Page, width: number,
 
 async function expectInsideWindow(locator: Locator, width: number, height: number) {
   await expect(locator).toBeVisible()
-  const bounds = await locator.boundingBox()
-  expect(bounds).not.toBeNull()
-  if (!bounds) throw new Error('The visible element must have layout bounds.')
-  expect(bounds.width).toBeGreaterThan(0)
-  expect(bounds.height).toBeGreaterThan(0)
-  expect(bounds.x).toBeGreaterThanOrEqual(0)
-  expect(bounds.y).toBeGreaterThanOrEqual(0)
-  expect(bounds.x + bounds.width).toBeLessThanOrEqual(width + 1)
-  expect(bounds.y + bounds.height).toBeLessThanOrEqual(height + 1)
+  // xterm fits in a ResizeObserver after the native window has resized.
+  await expect(async () => {
+    const bounds = await locator.boundingBox()
+    expect(bounds).not.toBeNull()
+    if (!bounds) throw new Error('The visible element must have layout bounds.')
+    expect(bounds.width).toBeGreaterThan(0)
+    expect(bounds.height).toBeGreaterThan(0)
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.y).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width + 1)
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(height + 1)
+  }).toPass({ timeout: 7500 })
 }
 
 test('starts the built desktop application with its isolated preload bridge', async ({ luma }) => {
@@ -64,12 +67,20 @@ test('starts the built desktop application with its isolated preload bridge', as
   expect(bridge).toEqual({
     info: { version: nativeInfo.version, platform: nativeInfo.platform },
     keys: [
+      'onFlushEdits',
+      'getPhotoStatistics',
+      'getEdits',
+      'updateEdits',
+      'getEditHistory',
+      'undoEdit',
+      'redoEdit',
       'getLensSettings',
       'updateLensSettings',
       'getAppInfo',
       'listPhotos',
       'locatePhoto',
       'getPhotoRange',
+      'requestEditingPreview',
       'requestFullPreview',
       'releaseFullPreview',
       'requestCachedFullPreview',

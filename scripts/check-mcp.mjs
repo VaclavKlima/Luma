@@ -1,15 +1,18 @@
+import { artifactDirectory } from './verification-runner.mjs'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { _electron as electron } from '@playwright/test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const output = new URL('../artifacts/mcp/', import.meta.url)
+const output = pathToFileURL(
+  join(process.env.LUMA_VERIFICATION_DIR ?? (await artifactDirectory('mcp')), 'mcp') + '/',
+)
 let endpoint = 'http://127.0.0.1:9222'
 const isolated = process.argv.includes('--isolated')
 let desktop
@@ -65,6 +68,9 @@ try {
       env,
       chromiumSandbox: true,
     })
+    const actualProfile = await desktop.evaluate(({ app }) => app.getPath('userData'))
+    if ((await realpath(actualProfile)) !== (await realpath(profile)))
+      throw new Error('MCP profile isolation failed')
     await desktop.firstWindow()
     await desktop.evaluate(({ dialog }, root) => {
       dialog.showOpenDialog = async () => ({
@@ -95,7 +101,7 @@ try {
       fileURLToPath(new URL('../node_modules/@playwright/mcp/cli.js', import.meta.url)),
       `--cdp-endpoint=${endpoint}`,
       '--caps=vision',
-      '--output-dir=artifacts/mcp',
+      `--output-dir=${fileURLToPath(output)}`,
     ],
     cwd: root,
     stderr: 'pipe',
@@ -246,14 +252,14 @@ try {
         const scale = Number(viewport.dataset.scale);
         if (viewport.dataset.resolution !== 'full' || !image.dataset.src.includes('/full/'))
           throw new Error('Full resolution was not displayed');
-        if (scale <= 1 || Math.abs(image.getBoundingClientRect().width / scale - image.width) > 1)
+        if (scale <= 1 || Math.abs(image.getBoundingClientRect().width * devicePixelRatio - image.width) > 1 || Number(viewport.dataset.imageWidth) <= 0)
           throw new Error('Full-resolution zoom did not preserve native pixel dimensions');
-        return {resolution: viewport.dataset.resolution, width: image.width, height: image.height, scale};
+        return {resolution: viewport.dataset.resolution, width: Number(viewport.dataset.imageWidth), height: Number(viewport.dataset.imageHeight), scale};
       }`,
     })
     const zoomScreenshot = await call('browser_take_screenshot', {
       type: 'png',
-      filename: 'artifacts/mcp/preview-zoom.png',
+      filename: fileURLToPath(new URL('preview-zoom.png', output)),
     })
     const zoomImage = zoomScreenshot.result.content?.find((item) => item.type === 'image')
     if (zoomImage)
@@ -351,7 +357,7 @@ try {
     })
     await call('browser_take_screenshot', {
       type: 'png',
-      filename: 'artifacts/mcp/lens-corrections.png',
+      filename: fileURLToPath(new URL('lens-corrections.png', output)),
     })
     await clickButton('Select sony-zv1.ARW')
     await call('browser_press_key', { key: 'Delete' })
@@ -384,7 +390,7 @@ try {
     throw new Error('The disconnected console was not visible.')
   const screenshot = await call('browser_take_screenshot', {
     type: 'png',
-    filename: 'artifacts/mcp/workspace.png',
+    filename: fileURLToPath(new URL('workspace.png', output)),
   })
   const inlineImage = screenshot.result.content?.find((item) => item.type === 'image')
   if (inlineImage)
@@ -396,7 +402,7 @@ try {
   console.log(
     `Passed: MCP discovery, snapshot, ${isolated ? 'background import, progress details, consistent full-resolution previews, persistent RAW lens controls, zoom, pointer drag, Fit reset, duplicate detection, multiple selection, confirmed deletion' : 'library interaction'}, console, and screenshot.`,
   )
-  console.log('Artifacts: artifacts/mcp/workspace.png and artifacts/mcp/protocol-check.json')
+  console.log(`Artifacts: ${fileURLToPath(output)}`)
 } catch (error) {
   console.error(error instanceof Error ? error.message : error)
   process.exitCode = 1
@@ -408,6 +414,24 @@ try {
       dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
     })
     .catch(() => undefined)
+  const child = desktop?.process()
   await desktop?.close().catch(() => undefined)
-  if (profile) await rm(profile, { recursive: true, force: true })
+  if (child && child.exitCode === null && child.signalCode === null) {
+    const exited = new Promise((resolve) => child.once('exit', resolve))
+    child.kill('SIGKILL')
+    await exited
+  }
+  if (profile) {
+    await rm(profile, { recursive: true, force: true })
+    try {
+      await access(profile)
+      console.error('MCP temporary profile was not removed')
+      process.exitCode = 1
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.error(error)
+        process.exitCode = 1
+      }
+    }
+  }
 }

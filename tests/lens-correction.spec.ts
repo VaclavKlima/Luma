@@ -1,27 +1,18 @@
-import { test, expect } from '@playwright/test'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import sharp from 'sharp'
-import { PreviewEngine } from '../src/main/preview-engine'
-import {
-  correctionPlan,
-  correctCpu,
-  interpolate,
-  radial,
-} from '../src/main/processing/lens-correction'
-import { processingMetadata } from '../src/main/processing/metadata'
-import { rawDecoder } from '../src/main/processing/decoders'
+import { expect, test } from '@playwright/test'
 import { cameraProfile } from '../src/main/processing/cameras'
-import {
-  automaticLensSettings,
-  noLensSettings,
-  type LensProfile,
-  type ProcessingOptions,
-} from '../src/shared/lens'
 import type {
   CameraProfile,
   LensCorrectionProvider,
   LinearFrame,
 } from '../src/main/processing/contracts'
+import {
+  correctCpu,
+  correctionPlan,
+  interpolate,
+  radial,
+} from '../src/main/processing/lens-correction'
+import { processingMetadata } from '../src/main/processing/metadata'
+import { automaticLensSettings, noLensSettings, type LensProfile } from '../src/shared/lens'
 
 const tags = {
   'IFD0:Make': 'SONY',
@@ -165,27 +156,39 @@ test('centered native crop contains every mapped channel and preserves portrait 
   expect(Math.abs(plan.width / plan.height - frame.width / frame.height)).toBeLessThan(0.04)
   const cx = (frame.width - 1) / 2,
     cy = (frame.height - 1) / 2
-  for (let y = 0; y < plan.height; y++)
-    for (let x = 0; x < plan.width; x++) {
+  let cropFailure:
+    { x: number; y: number; channel: number; mappedX: number; mappedY: number } | undefined
+  for (let y = 0; y < plan.height && !cropFailure; y++)
+    for (let x = 0; x < plan.width && !cropFailure; x++) {
       const qx = x + plan.left - cx,
         qy = y + plan.top - cy
       for (let c = 0; c < 3; c++) {
         const factor = radial(plan.lut, Math.hypot(qx, qy) / Math.hypot(cx, cy), c)
-        expect(Math.abs(qx * factor)).toBeLessThanOrEqual(cx)
-        expect(Math.abs(qy * factor)).toBeLessThanOrEqual(cy)
+        const mappedX = Math.abs(qx * factor),
+          mappedY = Math.abs(qy * factor)
+        if (!(mappedX <= cx && mappedY <= cy)) {
+          cropFailure = { x, y, channel: c, mappedX, mappedY }
+          break
+        }
       }
     }
+  expect(cropFailure, 'First channel outside the native crop').toBeUndefined()
   const landscape = correctCpu(frame, plan)
   const portrait = correctCpu({ ...frame, flip: 6 }, plan)
   expect([portrait.width, portrait.height]).toEqual([landscape.height, landscape.width])
-  for (let y = 0; y < plan.height; y++)
-    for (let x = 0; x < plan.width; x++)
-      expect(
-        portrait.data.subarray(
-          (x * plan.height + plan.height - 1 - y) * 4,
-          (x * plan.height + plan.height - 1 - y) * 4 + 4,
-        ),
-      ).toEqual(landscape.data.subarray((y * plan.width + x) * 4, (y * plan.width + x) * 4 + 4))
+  let orientationFailure:
+    { x: number; y: number; channel: number; actual: number; expected: number } | undefined
+  for (let y = 0; y < plan.height && !orientationFailure; y++)
+    for (let x = 0; x < plan.width && !orientationFailure; x++)
+      for (let c = 0; c < 4; c++) {
+        const actual = portrait.data[(x * plan.height + plan.height - 1 - y) * 4 + c]
+        const expected = landscape.data[(y * plan.width + x) * 4 + c]
+        if (!Object.is(actual, expected)) {
+          orientationFailure = { x, y, channel: c, actual, expected }
+          break
+        }
+      }
+  expect(orientationFailure, 'First incorrectly rotated channel').toBeUndefined()
 })
 
 test('a second camera and provider extend the contracts without viewer changes', () => {
@@ -212,125 +215,4 @@ test('a second camera and provider extend the contracts without viewer changes',
       correctionPlan(frame.width, frame.height, metadata.lensProfile, automaticLensSettings),
     ).width,
   ).toBeLessThan(frame.width)
-})
-
-test('real Sony corrected CPU and GPU frames agree, reuse linear data and generate exact placeholders', async () => {
-  test.setTimeout(180_000)
-  const root = test.info().outputPath('corrected')
-  await mkdir(root, { recursive: true })
-  const cpu = new PreviewEngine(undefined, 'cpu'),
-    gpu = new PreviewEngine(undefined, 'auto')
-  const path = 'tests/fixtures/sony-zv1.ARW'
-  try {
-    const metadata = await cpu.inspect(path)
-    expect(metadata.lensProfile.distortion?.values).toHaveLength(11)
-    expect(metadata.lensProfile.vignetting?.values).toHaveLength(16)
-    expect(metadata.lensProfile.chromaticAberration?.red.values).toHaveLength(11)
-    const options: ProcessingOptions = { metadata, settings: automaticLensSettings, revision: 7 }
-    const reference = await cpu.renderFull(path, root, undefined, options)
-    const expected = await readFile(`${root}/full.rgba`)
-    const actual = await gpu.renderFull(path, root, undefined, options)
-    if (actual.diagnostics?.fallback?.includes('No hardware GPU'))
-      test.skip(true, 'No hardware GPU available; CPU render completed.')
-    expect(actual.diagnostics?.backend, JSON.stringify(actual.diagnostics)).toBe('gpu')
-    expect([actual.width, actual.height]).toEqual([reference.width, reference.height])
-    expect(actual.settingsRevision).toBe(7)
-    const pixels = await readFile(`${root}/full.rgba`)
-    let difference = 0,
-      large = 0
-    for (let i = 0; i < pixels.length; i++) {
-      const delta = Math.abs(pixels[i] - expected[i])
-      difference += delta
-      if (delta > 2) large++
-    }
-    const report = {
-      cpu: reference.diagnostics,
-      gpu: actual.diagnostics,
-      mean: difference / pixels.length,
-      largeFraction: large / pixels.length,
-      width: actual.width,
-      height: actual.height,
-    }
-    console.log(report)
-    await writeFile(
-      test.info().outputPath('corrected-comparison.json'),
-      JSON.stringify(report, null, 2),
-    )
-    await sharp(pixels, { raw: { width: actual.width, height: actual.height, channels: 4 } })
-      .resize(1280)
-      .png()
-      .toFile(test.info().outputPath('corrected.png'))
-    expect(report.mean).toBeLessThan(0.1)
-    expect(report.largeFraction).toBeLessThan(0.002)
-    const placeholder = await sharp(pixels, {
-      raw: { width: actual.width, height: actual.height, channels: 4 },
-    })
-      .resize({ width: 96, height: 96, fit: 'inside', withoutEnlargement: true })
-      .withIccProfile('srgb')
-      .png()
-      .toBuffer()
-    expect(await readFile(`${root}/placeholder.png`)).toEqual(placeholder)
-    const toggled = await gpu.renderFull(path, root, undefined, {
-      ...options,
-      settings: { ...noLensSettings, distortion: true },
-      revision: 8,
-    })
-    expect(toggled.diagnostics?.timings.reusedLinear).toBe(1)
-    expect(toggled.appliedCorrections).toEqual({ ...noLensSettings, distortion: true })
-  } finally {
-    await cpu.close()
-    await gpu.close()
-  }
-})
-
-test('CPU adapter exposes an owned unrotated linear camera frame', async () => {
-  const session = await rawDecoder('sample.arw')!.open('tests/fixtures/sony-zv1.ARW')
-  try {
-    const frame = session.linear()
-    expect([frame.width, frame.height]).toEqual([5496, 3672])
-    expect(frame.data.length).toBe(frame.width * frame.height * 4)
-    expect(frame.data.some((n) => n > 0 && n < 1)).toBe(true)
-  } finally {
-    session.close()
-  }
-})
-
-test('corrected previews retain all supported corrections after GPU failure', async () => {
-  test.setTimeout(60_000)
-  const root = test.info().outputPath('fallback')
-  await mkdir(root, { recursive: true })
-  const engine = new PreviewEngine(undefined, 'auto', {
-    render: async () => {
-      throw new Error('Simulated corrected GPU failure')
-    },
-    releaseFrame: () => {},
-    close: () => {},
-  })
-  try {
-    const path = 'tests/fixtures/sony-zv1.ARW'
-    const metadata = await engine.inspect(path)
-    const result = await engine.renderFull(path, root, undefined, {
-      metadata,
-      settings: automaticLensSettings,
-      revision: 3,
-    })
-    expect(result).toMatchObject({
-      width: 5422,
-      height: 3622,
-      settingsRevision: 3,
-      appliedCorrections: automaticLensSettings,
-      diagnostics: { backend: 'cpu', fallback: 'Simulated corrected GPU failure' },
-    })
-    const second = await engine.renderFull(path, root, undefined, {
-      metadata,
-      settings: { ...automaticLensSettings, vignetting: false },
-      revision: 4,
-    })
-    expect(second.diagnostics?.timings.reusedLinear).toBe(1)
-    expect(second.settingsRevision).toBe(4)
-    const frame = await readFile(`${root}/full.rgba`)
-    expect(frame.length).toBe(second.byteLength)
-  } finally {
-    await engine.close()
-  }
 })

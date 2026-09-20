@@ -38,7 +38,7 @@ test('keeps the image point under the pointer unchanged during zoom and clamps a
     x: 0,
     y: 0,
   })
-  expect(zoomAt(after, 20, pointer, image, viewport).scale).toBe(4)
+  expect(zoomAt(after, 64, pointer, image, viewport).scale).toBe(32)
 })
 
 test('preserves manual center coordinates on resize and normalizes wheel and preset steps', () => {
@@ -50,5 +50,5 @@ test('preserves manual center coordinates on resize and normalizes wheel and pre
   expect(stepScale(0.4, 1, 0.1)).toBe(0.5)
   expect(stepScale(0.4, -1, 0.1)).toBe(0.25)
   expect(stepScale(0.1, -1, 0.04)).toBe(0.04)
-  expect(stepScale(4, 1, 0.1)).toBe(4)
+  expect(stepScale(32, 1, 0.1)).toBe(32)
 })

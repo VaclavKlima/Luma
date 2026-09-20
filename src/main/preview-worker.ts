@@ -30,16 +30,18 @@ process.on('message', async (data: PreviewWorkerRequest) => {
   }
   try {
     const result =
-      data.type === 'metadata'
-        ? await engine.inspect(data.path)
-        : data.type === 'full'
-          ? await engine.renderFull(
-              data.path,
-              data.output,
-              (stage) => send({ type: 'stage', stage }),
-              data.options,
-            )
-          : await engine.process(data.path, data.output)
+      data.type === 'statistics'
+        ? await engine.statistics(data.path, data.frame!)
+        : data.type === 'metadata'
+          ? await engine.inspect(data.path)
+          : data.type === 'full'
+            ? await engine.renderFull(
+                data.path,
+                data.output,
+                (stage) => send({ type: 'stage', stage }),
+                data.options,
+              )
+            : await engine.process(data.path, data.output)
     send({ type: 'result', result })
   } catch (error) {
     send({ type: 'error', error: error instanceof Error ? error.message : String(error) })

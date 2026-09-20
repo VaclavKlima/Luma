@@ -1,8 +1,11 @@
+import type { WhiteBalanceProfile } from '../../shared/white-balance'
+import type { DisplayTransform } from '../../shared/adjustments'
 // LibRaw 0.22.1 processing policy adapted under CDDL-1.0. See third_party/libraw.
 import { cameraProfile } from '../processing/cameras'
 import type { LibRaw } from '@colorhythm/libraw-wasm'
 
 export interface RawSource {
+  whiteBalance?: WhiteBalanceProfile
   pixels: Uint16Array<ArrayBuffer>
   width: number
   height: number
@@ -80,7 +83,7 @@ export function readGpuSource(decoder: LibRaw): RawSource | null {
 }
 
 /** LibRaw's SDR display curve, including its histogram-based automatic brightness. */
-export function displayCurve(histogram: Uint32Array, pixels: number): Uint32Array<ArrayBuffer> {
+export function displayTransform(histogram: Uint32Array, pixels: number): DisplayTransform {
   let white = 32
   const percentile = Math.trunc(pixels * 0.01)
   for (let c = 0; c < 3; c++) {
@@ -99,9 +102,15 @@ export function displayCurve(histogram: Uint32Array, pixels: number): Uint32Arra
   }
   const threshold = toe / slope,
     offset = toe * (1 / power - 1)
+  return { white: (white * 8) / 65535, threshold, offset, quantize: true }
+}
+export function displayCurve(histogram: Uint32Array, pixels: number): Uint32Array<ArrayBuffer> {
+  const { white, threshold, offset } = displayTransform(histogram, pixels)
+  const power = 1 / 2.4,
+    slope = 12.92
   const curve = new Uint32Array(65536)
   for (let i = 0; i < curve.length; i++) {
-    const r = i / (white * 8)
+    const r = i / (white * 65535)
     curve[i] =
       r >= 1
         ? 255

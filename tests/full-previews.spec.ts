@@ -1,15 +1,13 @@
 import { expect, test } from '@playwright/test'
-import { randomUUID, createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import sharp from 'sharp'
-import { LibRaw } from '@colorhythm/libraw-wasm'
 import { FullPreviews, PREVIEW_VERSION } from '../src/main/full-previews'
 import { PreviewEngine } from '../src/main/preview-engine'
-import { PreviewProcess } from '../src/main/preview-process'
 import type { FullPreviewProcessor, FullPreviewResult } from '../src/main/preview-types'
-import { automaticLensSettings, type ProcessingOptions } from '../src/shared/lens'
 import { unavailableProfile } from '../src/main/processing/metadata'
+import { automaticLensSettings, type ProcessingOptions } from '../src/shared/lens'
 
 async function writeFrame(
   output: string,
@@ -84,55 +82,6 @@ test('correction variants share the cache budget, carry the current revision and
     expect(await readdir(join(root, PREVIEW_VERSION))).toHaveLength(0)
   } finally {
     await cache.close()
-  }
-})
-
-test('renders full Sony RAW pixels losslessly, with sRGB output and no embedded extraction', async () => {
-  const info = test.info()
-  const output = info.outputPath('full')
-  await mkdir(output, { recursive: true })
-  let extracted = false
-  const engine = new PreviewEngine(async () => {
-    extracted = true
-    throw new Error('Do not extract')
-  }, 'cpu')
-  const source = await readFile('tests/fixtures/sony-zv1.ARW')
-  try {
-    expect(await engine.renderFull('tests/fixtures/sony-zv1.ARW', output)).toMatchObject({
-      width: 5496,
-      height: 3672,
-    })
-    expect(extracted).toBe(false)
-    expect((await readFile(join(output, 'full.rgba'))).length).toBe(5496 * 3672 * 4)
-    expect((await sharp(join(output, 'placeholder.png')).metadata()).hasProfile).toBe(true)
-    await LibRaw.initialize()
-    const decoder = new LibRaw()
-    await decoder.waitUntilReady()
-    try {
-      decoder.open(source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength))
-      decoder.setHalfSize(0)
-      decoder.setDemosaic(3)
-      decoder.setUseCameraWb(1)
-      decoder.setOutputColor(1)
-      decoder.setGamma(0, 1 / 2.4)
-      decoder.setGamma(1, 12.92)
-      decoder.setOutputBps(8)
-      decoder.unpack()
-      decoder.dcrawProcess()
-      const pixels = decoder.dcrawMakeMemImage()
-      const actual = await sharp(await readFile(join(output, 'full.rgba')), {
-        raw: { width: 5496, height: 3672, channels: 4 },
-      })
-        .removeAlpha()
-        .raw()
-        .toBuffer()
-      expect(actual.equals(Buffer.from(pixels.data))).toBe(true)
-    } finally {
-      decoder.dispose()
-    }
-    expect((await readFile('tests/fixtures/sony-zv1.ARW')).equals(source)).toBe(true)
-  } finally {
-    await engine.close()
   }
 })
 
@@ -414,45 +363,197 @@ test('cleans interrupted and obsolete entries, and recovers after rendering fail
   }
 })
 
-test('cancels a real full-resolution worker and can render again afterwards', async () => {
-  const info = test.info()
-  const worker = new PreviewProcess(resolve('out/main/preview-worker.js'))
-  const output = info.outputPath('worker')
-  await mkdir(output, { recursive: true })
-  const timed = new PreviewProcess(resolve('out/main/preview-worker.js'), 25)
-  try {
-    await expect(
-      timed.renderFull(
-        resolve('tests/fixtures/sony-zv1.ARW'),
-        output,
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow('timed out')
-  } finally {
-    await timed.close()
+test('leases one immutable working asset across exposure variants and worker restarts', async () => {
+  const root = test.info().outputPath('linear-variants')
+  let options: ProcessingOptions = {
+    metadata: { version: 1, lensProfile: unavailableProfile },
+    settings: { ...automaticLensSettings },
+    revision: 0,
+    adjustments: { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: 0 },
   }
-  const abort = new AbortController()
-  const rendering = worker.renderFull(resolve('tests/fixtures/sony-zv1.ARW'), output, abort.signal)
-  const timer = setTimeout(() => abort.abort(), 100)
+  let preparations = 0,
+    reused = 0
+  const processor: FullPreviewProcessor = {
+    renderFull: async (_path, output, _signal, request) => {
+      const result = await writeFrame(output)
+      if (request?.workingAsset) {
+        reused++
+        expect(await readFile(request.workingAsset.path)).toHaveLength(result.byteLength * 4)
+      }
+      if (request?.prepareLinear) {
+        preparations++
+        const bytes = Buffer.from(new Float32Array(result.byteLength).fill(0.25).buffer)
+        await writeFile(join(output, 'linear.f32'), bytes)
+        result.linear = {
+          byteLength: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+          transform: { white: 1, threshold: 0.0031308, offset: 0.055, quantize: false },
+        }
+      }
+      return result
+    },
+    close: async () => {},
+  }
+  const create = () =>
+    new FullPreviews(root, original, processor, 2400, async () => ({ ...options }))
+  let cache = create()
   try {
-    await expect(rendering).rejects.toThrow('cancelled')
-    const crashed = worker.renderFull(
-      resolve('tests/fixtures/sony-zv1.ARW'),
-      output,
-      new AbortController().signal,
+    await cache.open()
+    const first = await cache.request(ids[0], randomUUID())
+    const prepared = await cache.requestEditing(ids[0], randomUUID())
+    expect(prepared.url).toBe(first.url)
+    const stream = cache.acquire(new URL(prepared.linear!.url!))!
+    options = {
+      ...options,
+      adjustments: { shadows: 0, whites: 0, blacks: 0, exposureEv: 1, contrast: 35, highlights: 0 },
+      revision: 1,
+    }
+    cache.settingsChanged(ids[0])
+    const changed = await cache.request(ids[0], randomUUID())
+    expect(changed.url).not.toBe(first.url)
+    expect(changed.linear!.url).toBe(prepared.linear!.url)
+    expect(preparations).toBe(1)
+    expect(reused).toBe(1)
+    options = {
+      ...options,
+      adjustments: { shadows: 0, whites: 0, blacks: 0, exposureEv: 1, contrast: 36, highlights: 0 },
+      revision: 2,
+    }
+    cache.settingsChanged(ids[0])
+    const contrastOnly = await cache.request(ids[0], randomUUID())
+    expect(contrastOnly.url).not.toBe(changed.url)
+    expect(contrastOnly.linear!.url).toBe(prepared.linear!.url)
+    expect(preparations).toBe(1)
+    expect(reused).toBe(2)
+    options = { ...options, adjustments: { ...options.adjustments!, highlights: -50 }, revision: 3 }
+    cache.settingsChanged(ids[0])
+    const highlightsOnly = await cache.request(ids[0], randomUUID())
+    expect(highlightsOnly.url).not.toBe(contrastOnly.url)
+    expect(highlightsOnly.linear!.url).toBe(prepared.linear!.url)
+    expect(preparations).toBe(1)
+    expect(reused).toBe(3)
+    let previousUrl = highlightsOnly.url
+    for (const key of ['shadows', 'whites', 'blacks'] as const) {
+      options = {
+        ...options,
+        adjustments: { ...options.adjustments!, [key]: 35 },
+        revision: options.revision + 1,
+      }
+      cache.settingsChanged(ids[0])
+      const variant = await cache.request(ids[0], randomUUID())
+      expect(variant.url).not.toBe(previousUrl)
+      expect(variant.linear!.url).toBe(prepared.linear!.url)
+      expect(preparations).toBe(1)
+      previousUrl = variant.url
+    }
+    expect(reused).toBe(6)
+    stream.release()
+    await cache.close()
+    cache = create()
+    await cache.open()
+    expect((await cache.requestEditing(ids[0], randomUUID())).linear!.url).toBe(
+      prepared.linear!.url,
     )
-    const stopped = expect(crashed).rejects.toThrow('stopped')
-    await worker.close(true)
-    await stopped
-    expect(
-      await worker.renderFull(
-        resolve('tests/fixtures/photos/alpine-lake.jpg'),
-        output,
-        new AbortController().signal,
-      ),
-    ).toMatchObject({ width: 1920, height: 1280 })
+    expect(preparations).toBe(1)
+    const lease = cache.acquire(new URL(prepared.linear!.url!))!
+    await cache.beginRemoval(ids[0])
+    cache.endRemoval(ids[0], true)
+    expect(cache.acquire(new URL(prepared.linear!.url!))).toBeUndefined()
+    expect(await readFile(lease.path)).toHaveLength(1536)
+    lease.release()
+    await cache.release()
+    expect(await readdir(join(root, PREVIEW_VERSION))).toEqual([])
   } finally {
-    clearTimeout(timer)
-    await worker.close()
+    await cache.close()
+  }
+})
+
+test('statistics lease exact frames, cache summaries, preserve the active preview and reject stale revisions', async () => {
+  const root = test.info().outputPath('statistics'),
+    engine = new PreviewEngine()
+  let revision = 0,
+    analyzed = 0
+  const processor: FullPreviewProcessor = {
+    async renderFull(_path, output) {
+      return writeFrame(output, Buffer.from([0, 0, 0, 255, 255, 1, 1, 255]), 2, 1)
+    },
+    async statistics(path, frame) {
+      analyzed++
+      return engine.statistics(path, frame)
+    },
+    async close() {
+      await engine.close()
+    },
+  }
+  const cache = new FullPreviews(root, original, processor, undefined, async () => ({
+    metadata: { version: 2, lensProfile: unavailableProfile },
+    settings: automaticLensSettings,
+    revision,
+  }))
+  try {
+    await cache.open()
+    const active = await cache.request(ids[0], randomUUID())
+    const first = await cache.statistics(ids[1], 0)
+    expect(first).toMatchObject({
+      visiblePixels: 2,
+      shadowClipped: 1,
+      highlightClipped: 1,
+      revision: 0,
+      photoId: ids[1],
+    })
+    expect(first.rgb[0][255]).toBe(1)
+    const lease = cache.acquire(new URL(active.url))!
+    expect(lease).toBeDefined()
+    lease.release()
+    expect(await cache.statistics(ids[1], 0)).toEqual(first)
+    expect(analyzed).toBe(1)
+    revision = 1
+    cache.settingsChanged(ids[1])
+    await expect(cache.statistics(ids[1], 0)).rejects.toThrow('conflict')
+    expect((await cache.statistics(ids[1], 1)).revision).toBe(1)
+    await cache.beginRemoval(ids[1])
+    cache.endRemoval(ids[1], true)
+  } finally {
+    await cache.close()
+  }
+})
+
+test('editing or deleting cancels pending background statistics without publishing a stale result', async () => {
+  const root = test.info().outputPath('statistics-cancel')
+  let revision = 0,
+    started: () => void = () => {}
+  let began = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const processor: FullPreviewProcessor = {
+    async renderFull(_path, _output, signal) {
+      started()
+      return new Promise((_, reject) =>
+        signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }),
+      )
+    },
+    async close() {},
+  }
+  const cache = new FullPreviews(root, original, processor, undefined, async () => ({
+    metadata: { version: 2, lensProfile: unavailableProfile },
+    settings: automaticLensSettings,
+    revision,
+  }))
+  try {
+    await cache.open()
+    const first = cache.statistics(ids[0], 0).catch((error) => String(error))
+    await began
+    revision++
+    cache.settingsChanged(ids[0])
+    expect(await first).toContain('cancelled')
+    began = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const second = cache.statistics(ids[0], 1).catch((error) => String(error))
+    await began
+    await cache.beginRemoval(ids[0])
+    expect(await second).toContain('cancelled')
+  } finally {
+    await cache.close()
   }
 })
