@@ -1,6 +1,6 @@
 # Natural rendering and full HDR roadmap
 
-**Status: Planned.** This directory specifies future implementation; it adds no application behavior. Each feature brief uses the same eleven sections and includes measurable acceptance criteria. Unresolved algorithms, dependencies, and numerical tolerances require recorded research evidence before implementation is accepted.
+**Status: staged roadmap.** The [experimental Sony RAW HDR milestone](../hdr-processing.md) implements a limited processing, display, tone-mapping and analysis foundation. The broader workflow below remains planned. Each feature brief uses the same eleven sections and includes measurable acceptance criteria. Unresolved algorithms, dependencies, and numerical tolerances require recorded research evidence before implementation is accepted.
 
 The destination is **RAW brackets or HDR files → nondestructive HDR editing → HDR and SDR preview → HDR and SDR export**. A single RAW photograph uses the same foundation without requiring a merge. Natural rendering means believable color, smooth highlights, useful shadow depth, and controlled detail, with explicit creative controls.
 
@@ -8,11 +8,11 @@ The destination is **RAW brackets or HDR files → nondestructive HDR editing �
 
 The [root README](../../README.md) describes the running application. It imports JPEG, PNG, TIFF, and Sony ARW into a persistent managed library. Exposure, contrast, highlights, shadows, whites, blacks, verified Sony RAW white balance, and verified lens corrections share revision-checked history. SDR histograms, clipping overlays, comparison, pixel inspection, and the dedicated editing MCP service exist. Other color controls remain disabled; the console cannot execute commands.
 
-The large preview is RGBA8 sRGB. Its bounded float assets support interactive SDR edits and are not HDR masters. Current support for a container such as JPEG or TIFF does not establish HDR decoding, gain-map support, or HDR export. Sony ZV-1 compressed ARW has a real fixture; additional cameras and recording modes require their own verification. Existing Linux results do not establish Windows/macOS support.
+Legacy processing retains RGBA8 sRGB output. The separate experimental HDR path uses Float32 Rec.2020 working data and HDR/SDR output targets. Current support for a container such as JPEG or TIFF does not establish HDR decoding, gain-map support, or HDR export. Sony ZV-1 compressed ARW has a real fixture; additional cameras and recording modes require their own verification. Existing Linux results do not establish Windows/macOS support.
 
 ## Implementation order and dependencies
 
-All entries are **Planned**. The prerequisites below are also repeated in each brief. A display feasibility spike uses synthetic float patterns before a production HDR pipeline exists; final display acceptance follows the processing and tone-mapping foundations. This separation avoids a circular dependency.
+The briefs describe the complete destination; experimental subsets do not imply completion of every acceptance criterion. The prerequisites below are also repeated in each brief. A display feasibility spike uses synthetic float patterns before a production HDR pipeline exists; final display acceptance follows the processing and tone-mapping foundations. This separation avoids a circular dependency.
 
 | Stage | Brief                                             | Required foundation and deliverable                                                                                                          |
 | ----- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |

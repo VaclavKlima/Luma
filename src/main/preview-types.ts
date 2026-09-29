@@ -1,4 +1,12 @@
 import type { ImageStatistics } from '../shared/statistics'
+import type { HdrStatistics, HdrAnalysisDomain } from '../shared/hdr-statistics'
+import type { HdrWorkingAsset, DisplayTarget } from '../shared/hdr'
+export interface HdrStatisticsJob {
+  asset: HdrWorkingAsset
+  adjustments: AdjustmentParameters
+  domain: HdrAnalysisDomain
+  target: DisplayTarget
+}
 import type { AdjustmentParameters } from '../shared/adjustments'
 import type { LensSettings, ProcessingMetadata, ProcessingOptions } from '../shared/lens'
 import type { PhotoMetadata, Photo, LinearAsset } from '../shared/contracts'
@@ -12,13 +20,14 @@ export type PreviewWorkerRequest =
       path: string
       output: string
       options?: ProcessingOptions
-      frame?: { width: number; height: number; sha256: string }
+      frame?: { width: number; height: number; sha256: string; hdr?: HdrStatisticsJob }
     }
 export type PreviewWorkerResponse =
   | { type: 'stage'; stage: PreviewStage }
   | {
       type: 'result'
-      result: PreviewResult | FullPreviewResult | ProcessingMetadata | ImageStatistics
+      result:
+        PreviewResult | FullPreviewResult | ProcessingMetadata | ImageStatistics | HdrStatistics
     }
   | { type: 'error'; error: string }
 
@@ -41,7 +50,7 @@ export interface FullPreviewResult {
   appliedCorrections?: LensSettings
   width: number
   height: number
-  format: 'rgba8-srgb'
+  format: 'rgba8-srgb' | 'hdr-working'
   byteLength: number
   sha256: string
   renderId: string
@@ -55,6 +64,7 @@ export interface FullPreviewResult {
 }
 
 export interface FullPreviewProcessor {
+  hdrStatistics?(path: string, job: HdrStatisticsJob, signal: AbortSignal): Promise<HdrStatistics>
   statistics?(
     path: string,
     frame: { width: number; height: number; sha256: string },

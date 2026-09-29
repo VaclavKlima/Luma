@@ -1,3 +1,8 @@
+import { HDR_IMPORT_DEFAULT } from '../shared/hdr'
+import { DisplayState } from './display-state'
+import { installWaylandDisplayRefresh } from './wayland-display'
+import { pathToFileURL } from 'node:url'
+import { powerMonitor } from 'electron'
 import { startEditorEndpoint } from './editor-endpoint'
 import { randomUUID } from 'node:crypto'
 import { photoExtensions } from './processing/formats'
@@ -21,6 +26,16 @@ import { PhotoLibrary } from './library'
 import { PreviewProcess } from './preview-process'
 
 app.setName('Luma')
+app.enableSandbox()
+app.commandLine.appendSwitch('enable-blink-features', 'ScreenDetailedHdrHeadroom')
+if (process.platform === 'linux' && process.env.WAYLAND_DISPLAY) {
+  app.commandLine.appendSwitch('ozone-platform', 'wayland')
+  const features = app.commandLine.getSwitchValue('enable-features').split(',').filter(Boolean)
+  app.commandLine.appendSwitch('enable-features', [...new Set([...features, 'Vulkan'])].join(','))
+  app.commandLine.appendSwitch('enable-unsafe-webgpu')
+}
+if (process.env.LUMA_HDR_TEST === '1') app.commandLine.removeSwitch('force-color-profile')
+let displayState: DisplayState
 
 let mainWindow: BrowserWindow | null = null
 let library: PhotoLibrary | undefined
@@ -130,6 +145,7 @@ function createWindow(): void {
     },
   })
   mainWindow = window
+  installWaylandDisplayRefresh(window)
   const releasePreview = () => {
     void library?.fullPreviews.release().catch(() => undefined)
   }
@@ -141,10 +157,27 @@ function createWindow(): void {
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())
-  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => {
-    callback(false)
-  })
-  window.webContents.session.setPermissionCheckHandler(() => false)
+  const trustedUrl =
+    !app.isPackaged && process.env.ELECTRON_RENDERER_URL
+      ? new URL(process.env.ELECTRON_RENDERER_URL).href
+      : pathToFileURL(join(import.meta.dirname, '../renderer/index.html')).href
+  const allowed = (
+    contents: Electron.WebContents | null,
+    permission: string,
+    details: { isMainFrame: boolean; requestingUrl?: string },
+  ) =>
+    contents === window.webContents &&
+    permission === 'window-management' &&
+    details.isMainFrame &&
+    details.requestingUrl === trustedUrl &&
+    contents.getURL() === trustedUrl
+  window.webContents.session.setPermissionRequestHandler(
+    (contents, permission, callback, details) => callback(allowed(contents, permission, details)),
+  )
+  window.webContents.session.setPermissionCheckHandler((contents, permission, _origin, details) =>
+    allowed(contents, permission, details),
+  )
+  window.on('move', () => window.webContents.send('display:refresh'))
   window.once('ready-to-show', () => window.show())
   window.on('close', (event) => {
     if (!quitting) {
@@ -191,6 +224,68 @@ app
       return { version: app.getVersion(), platform: process.platform as AppInfo['platform'] }
     })
 
+    displayState = new DisplayState(
+      app.getPath('userData'),
+      (state) => {
+        if (mainWindow && !mainWindow.isDestroyed())
+          mainWindow.webContents.send('display:state', state)
+      },
+      () => mainWindow?.webContents.send('display:refresh'),
+    )
+    await displayState.open()
+    powerMonitor.on('resume', () => {
+      displayState.invalidate('Rechecking display after resume.')
+      mainWindow?.webContents.send('display:refresh')
+    })
+    ipcMain.handle('preview:diagnostics', (event) => {
+      trusted(event)
+      return {
+        ...library!.fullPreviews.getDiagnostics(),
+        presentation: displayState.get().presentation,
+      }
+    })
+    ipcMain.handle('preview:presentation', (event, value) => {
+      trusted(event)
+      if (
+        !value ||
+        typeof value.photoId !== 'string' ||
+        !Number.isSafeInteger(value.revision) ||
+        !Number.isSafeInteger(value.targetGeneration) ||
+        !['webgpu-hdr', 'canvas2d-hdr-sdr', 'legacy'].includes(value.backend) ||
+        !['hdr', 'sdr'].includes(value.mode) ||
+        !['loading', 'presented', 'failed'].includes(value.stage) ||
+        typeof value.reason !== 'string' ||
+        value.reason.length > 512 ||
+        !value.timings ||
+        Object.values(value.timings).some(
+          (n) => typeof n !== 'number' || !Number.isFinite(n) || n < 0,
+        )
+      )
+        throw new Error('Invalid preview presentation report.')
+      const active = library!.fullPreviews.getDiagnostics()
+      if (
+        active.photoId !== value.photoId ||
+        (active.revision !== undefined && active.revision !== value.revision)
+      )
+        return
+      displayState.reportPresentation(value)
+    })
+    ipcMain.handle('display:get', (event) => {
+      trusted(event)
+      return displayState.get()
+    })
+    ipcMain.handle('display:preference', (event, preference) => {
+      trusted(event)
+      return displayState.set(preference)
+    })
+    ipcMain.handle('display:capabilities', (event, capabilities) => {
+      trusted(event)
+      return displayState.report(capabilities)
+    })
+    ipcMain.handle('edits:upgrade-processing', (event, id, revision) => {
+      trusted(event)
+      return library!.upgradePhotoProcessing(id, revision)
+    })
     library = new PhotoLibrary(
       join(app.getPath('userData'), 'library'),
       new PreviewProcess(),
@@ -200,14 +295,36 @@ app
       },
       undefined,
       (path) => shell.trashItem(path),
+      undefined,
+      process.env.LUMA_TEST_LEGACY_IMPORTS !== '1' && HDR_IMPORT_DEFAULT,
     )
+    library.displayTarget = () => displayState.get()
     await library.open()
-    editorEndpoint = await startEditorEndpoint(app.getPath('userData'), library)
+    editorEndpoint = await startEditorEndpoint(app.getPath('userData'), library, displayState)
     protocol.handle('luma-photo', async (request) => {
       if (request.method !== 'GET') return new Response(null, { status: 404 })
       const asset = library?.fullPreviews.acquire(new URL(request.url))
       if (asset) {
-        const stream = createReadStream(asset.path)
+        const range = request.headers.get('range')
+        const match = range?.match(/^bytes=(\d+)-(\d+)$/)
+        const start = match ? Number(match[1]) : 0
+        const end = match ? Number(match[2]) : asset.byteLength - 1
+        if (
+          range &&
+          (!match ||
+            !Number.isSafeInteger(start) ||
+            !Number.isSafeInteger(end) ||
+            start < 0 ||
+            end < start ||
+            end >= asset.byteLength ||
+            end - start + 1 > 16 * 1024 ** 2)
+        ) {
+          asset.release()
+          return new Response(null, { status: 416 })
+        }
+        // Keep protocol chunks large enough to avoid thousands of cross-process transfers.
+        const highWaterMark = 1024 * 1024
+        const stream = createReadStream(asset.path, { start, end, highWaterMark })
         const abort = () => stream.destroy()
         request.signal.addEventListener('abort', abort, { once: true })
         stream.once('close', () => {
@@ -215,14 +332,21 @@ app
           asset.release()
         })
         if (request.signal.aborted) stream.destroy()
-        return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, {
-          headers: {
-            'Content-Type': asset.contentType,
-            'Content-Length': String(asset.byteLength),
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-store',
+        return new Response(
+          Readable.toWeb(stream, {
+            strategy: { highWaterMark, size: (chunk: Uint8Array) => chunk.byteLength },
+          }) as ReadableStream<Uint8Array>,
+          {
+            status: range ? 206 : 200,
+            headers: {
+              'Content-Type': asset.contentType,
+              'Content-Length': String(end - start + 1),
+              ...(range ? { 'Content-Range': `bytes ${start}-${end}/${asset.byteLength}` } : {}),
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'no-store',
+            },
           },
-        })
+        )
       }
       const path = library?.imagePath(request.url)
       if (!path || request.method !== 'GET') return new Response(null, { status: 404 })
@@ -234,9 +358,9 @@ app
         return new Response(null, { status: 404 })
       }
     })
-    ipcMain.handle('statistics:get', (event, id: string, revision: number) => {
+    ipcMain.handle('statistics:get', (event, id: string, revision: number, request) => {
       trusted(event)
-      return library!.getPhotoStatistics(id, revision).then(
+      return library!.getPhotoStatistics(id, revision, request).then(
         (statistics) => ({ statistics }),
         (error) => ({ error: String(error) }),
       )
@@ -279,6 +403,13 @@ app
       return library!.fullPreviews.request(id, token, regenerate).then(
         (preview) => ({ preview }),
         (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+      )
+    })
+    ipcMain.handle('preview:hdr', (event, id, token, regenerate = false) => {
+      trusted(event)
+      return library!.fullPreviews.requestHdr(id, token, regenerate).then(
+        (preview) => ({ preview }),
+        (error: unknown) => ({ error: String(error) }),
       )
     })
     ipcMain.handle('preview:editing', (event, id, token) => {

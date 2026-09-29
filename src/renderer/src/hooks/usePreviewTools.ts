@@ -1,15 +1,22 @@
+import type { HdrStatistics, HdrAnalysisDomain } from '../../../shared/hdr-statistics'
 import { useCallback, useMemo, useState } from 'react'
 import type { ImageStatistics } from '../../../shared/statistics'
 export type ComparisonMode = 'after' | 'before' | 'split'
 export interface PreviewToolsState {
+  hdr: boolean
+  domain: HdrAnalysisDomain
+  hdrOverlay: number
   mode: ComparisonMode
   split: number
   shadows: boolean
   highlights: boolean
   hover: 'shadows' | 'highlights' | null
-  analysis?: ImageStatistics
+  analysis?: ImageStatistics | HdrStatistics
 }
 const initial: PreviewToolsState = {
+  hdr: false,
+  domain: 'output',
+  hdrOverlay: 0,
   mode: 'after',
   split: 0.5,
   shadows: false,
@@ -30,7 +37,10 @@ export function usePreviewTools(photoId: string | undefined) {
     },
     [photoId],
   )
-  const analyze = useCallback((analysis?: ImageStatistics) => update({ analysis }), [update])
+  const analyze = useCallback(
+    (analysis?: ImageStatistics | HdrStatistics) => update({ analysis }),
+    [update],
+  )
   return useMemo(() => ({ ...value, update, analyze }), [value, update, analyze])
 }
 export type PreviewTools = ReturnType<typeof usePreviewTools>

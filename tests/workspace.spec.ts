@@ -67,6 +67,14 @@ test('starts the built desktop application with its isolated preload bridge', as
   expect(bridge).toEqual({
     info: { version: nativeInfo.version, platform: nativeInfo.platform },
     keys: [
+      'getPreviewDiagnostics',
+      'reportPreviewPresentation',
+      'getDisplayState',
+      'setPreviewPreference',
+      'reportDisplayCapabilities',
+      'onDisplayState',
+      'onDisplayRefresh',
+      'upgradePhotoProcessing',
       'onFlushEdits',
       'getPhotoStatistics',
       'getEdits',
@@ -80,6 +88,7 @@ test('starts the built desktop application with its isolated preload bridge', as
       'listPhotos',
       'locatePhoto',
       'getPhotoRange',
+      'requestHdrPreview',
       'requestEditingPreview',
       'requestFullPreview',
       'releaseFullPreview',

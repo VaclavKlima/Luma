@@ -19,6 +19,10 @@ test('stdio editing tools share persisted history with UI without a development 
   try {
     await client.connect(transport)
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+      'luma_get_preview_diagnostics',
+      'luma_get_display_state',
+      'luma_set_preview_preference',
+      'luma_upgrade_photo_processing',
       'luma_get_photo_statistics',
       'luma_list_photos',
       'luma_get_edits',
@@ -147,6 +151,13 @@ test('stdio editing tools share persisted history with UI without a development 
       },
     })
     await call('luma_undo_edit', { photoId, expectedRevision: 3 })
+    expect(
+      await call('luma_upgrade_photo_processing', { photoId, expectedRevision: 4 }),
+    ).toMatchObject({ revision: 5, settings: { processing: 'hdr-v1' } })
+    expect(await call('luma_undo_edit', { photoId, expectedRevision: 5 })).toMatchObject({
+      revision: 6,
+      settings: { processing: 'legacy-sdr-v1' },
+    })
     const connectionPath = join(luma.userDataDir, 'editor', 'connection.json')
     const connection = JSON.parse(await readFile(connectionPath, 'utf8'))
     if (process.platform !== 'win32') expect((await stat(connectionPath)).mode & 0o777).toBe(0o600)
@@ -163,7 +174,7 @@ test('stdio editing tools share persisted history with UI without a development 
     expect(browser.status).toBe(403)
     await luma.restart()
     expect(await call('luma_get_edits', { photoId })).toMatchObject({
-      revision: 4,
+      revision: 6,
       settings: { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: 0 },
       canRedo: true,
     })

@@ -1,4 +1,12 @@
 import type { PhotoStatistics } from '../shared/statistics'
+import type { HdrPhotoStatistics, HdrAnalysisDomain } from '../shared/hdr-statistics'
+import {
+  validateHdrSource,
+  HDR_SOURCE_VERSION,
+  HDR_ADJUSTMENT_VERSION,
+  HDR_OUTPUT_VERSION,
+  type DisplayTarget,
+} from '../shared/hdr'
 import { ADJUSTMENT_VERSION, neutralAdjustments } from '../shared/adjustments'
 import type { ProcessingOptions } from '../shared/lens'
 import { CROP_POLICY, LENS_RENDER_VERSION } from './processing/lens-correction'
@@ -8,11 +16,12 @@ import { frameByteLength } from '../shared/preview-frame'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { FullPreview } from '../shared/contracts'
+import { createReadStream } from 'node:fs'
+import type { FullPreview, HdrPreview, DisplayPreview } from '../shared/contracts'
 import type { FullPreviewProcessor, FullPreviewResult } from './preview-types'
 
 // Bump whenever decoding, color, or output policy changes.
-export const PREVIEW_VERSION = 'v6'
+export const PREVIEW_VERSION = 'v8'
 const hashPattern = /^[a-f0-9]{64}$/
 const tokenPattern = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
 interface Entry extends FullPreviewResult {
@@ -32,13 +41,21 @@ interface Request {
   abort: AbortController
   entry?: Entry
   linearEntry?: Entry
-  work?: Promise<FullPreview | null>
+  work?: Promise<DisplayPreview | null>
 }
 
 /** One foreground consumer, with serialized disk changes and independent stream leases. */
 export class FullPreviews {
+  private diagnostics: import('../shared/preview-diagnostics').PreviewDiagnostics = {
+    loadingStage: 'idle',
+    timings: {},
+  }
+  getDiagnostics() {
+    return { ...this.diagnostics }
+  }
   private entries = new Map<string, Entry>()
   private background = new Set<Request>()
+  private analyses = new Map<AbortController, string>()
   private active?: Request
   private running?: Request
   private blocked = new Set<string>()
@@ -78,13 +95,19 @@ export class FullPreviews {
         if (!hashPattern.test(id) || !tokenPattern.test(revision) || !this.original(id))
           throw new Error('Disposable preview')
         const metadata = JSON.parse(await readFile(join(path, 'entry.json'), 'utf8'))
-        const file = await stat(join(path, 'full.rgba'))
-        const placeholder = await stat(join(path, 'placeholder.png'))
+        const workingOnly = metadata.format === 'hdr-working'
+        if (workingOnly && !metadata.linear?.hdr) throw new Error('Missing HDR source descriptor.')
+        const file = workingOnly
+          ? { size: 0, isFile: () => true, mtimeMs: Date.now() }
+          : await stat(join(path, 'full.rgba'))
+        const placeholder = workingOnly
+          ? { size: 0, isFile: () => true }
+          : await stat(join(path, 'placeholder.png'))
         if (
           !file.isFile() ||
-          file.size !== frameByteLength(metadata.width, metadata.height) ||
+          file.size !== (workingOnly ? 0 : frameByteLength(metadata.width, metadata.height)) ||
           file.size !== metadata.byteLength ||
-          metadata.format !== 'rgba8-srgb' ||
+          (!workingOnly && metadata.format !== 'rgba8-srgb') ||
           !hashPattern.test(metadata.sha256) ||
           typeof metadata.renderId !== 'string' ||
           !placeholder.isFile() ||
@@ -96,14 +119,32 @@ export class FullPreviews {
         if (metadata.linear) {
           const linear = await stat(join(path, 'linear.f32'))
           if (
-            linear.size !== file.size * 4 ||
+            linear.size !== frameByteLength(metadata.width, metadata.height) * 4 ||
             linear.size !== metadata.linear.byteLength ||
             linear.size > 512 * 1024 ** 2 ||
             !hashPattern.test(metadata.linear.sha256)
           )
             throw new Error('Incomplete linear preview')
+          if (metadata.linear.hdr) {
+            const hdr = metadata.linear.hdr
+            validateHdrSource(hdr.source)
+            if (
+              hdr.width !== metadata.width ||
+              hdr.height !== metadata.height ||
+              hdr.byteLength !== linear.size ||
+              hdr.sha256 !== metadata.linear.sha256
+            )
+              throw new Error('Inconsistent HDR descriptor.')
+            const digest = createHash('sha256')
+            for await (const chunk of createReadStream(join(path, 'linear.f32'), {
+              highWaterMark: 1024 * 1024,
+            }))
+              digest.update(chunk)
+            if (digest.digest('hex') !== hdr.sha256) throw new Error('Damaged HDR working asset.')
+          }
         }
         this.entries.set(folder.name, {
+          diagnostics: metadata.diagnostics,
           statistics: metadata.statistics,
           sourceKey: metadata.sourceKey,
           linear: metadata.linear,
@@ -135,20 +176,27 @@ export class FullPreviews {
 
   request(id: string, token: string, regenerate = false): Promise<FullPreview> {
     return this.prepare(id, token, regenerate, false).then((preview) => {
-      if (!preview) throw new Error('The full preview was not generated.')
+      if (!preview || preview.format !== 'rgba8-srgb')
+        throw new Error('The full preview was not generated.')
       return preview
     })
   }
 
   requestEditing(id: string, token: string): Promise<FullPreview> {
     return this.prepare(id, token, false, false, true).then((preview) => {
-      if (!preview?.linear) throw new Error('A floating-point preview is unavailable.')
+      if (!preview?.linear || preview.format !== 'rgba8-srgb')
+        throw new Error('A floating-point preview is unavailable.')
       return preview
     })
   }
 
-  requestCached(id: string, token: string): Promise<FullPreview | null> {
-    return this.prepare(id, token, false, true)
+  async requestCached(id: string, token: string): Promise<FullPreview | null> {
+    const preview = await this.prepare(id, token, false, true)
+    return preview?.format === 'rgba8-srgb' ? preview : null
+  }
+  async requestHdr(id: string, token: string, regenerate = false): Promise<HdrPreview | null> {
+    const preview = await this.prepare(id, token, regenerate, false, true, false, true)
+    return preview?.format === 'hdr-working' ? preview : null
   }
 
   private prepare(
@@ -158,7 +206,8 @@ export class FullPreviews {
     cachedOnly: boolean,
     prepareLinear = false,
     background = false,
-  ): Promise<FullPreview | null> {
+    workingOnly = false,
+  ): Promise<DisplayPreview | null> {
     if (
       this.closed ||
       typeof id !== 'string' ||
@@ -175,10 +224,14 @@ export class FullPreviews {
       this.retainedPhoto = id
     }
     if (!background) {
+      for (const job of this.analyses.keys())
+        job.abort(new Error('Statistics interrupted by foreground preview.'))
       for (const job of this.background)
         job.abort.abort(new Error('Statistics interrupted by active preview.'))
       this.detach(false)
     }
+    const started = performance.now()
+    if (!background) this.diagnostics = { photoId: id, loadingStage: 'preparing', timings: {} }
     const request: Request = { id, token, abort: new AbortController() }
     if (background) this.background.add(request)
     else this.active = request
@@ -192,13 +245,19 @@ export class FullPreviews {
         }
         check()
         const options = await this.options?.(id, request.abort.signal)
-        if (options) options.prepareLinear = prepareLinear
+        if (workingOnly && options?.processing !== 'hdr-v1') return null
+        if (options) {
+          options.prepareLinear = prepareLinear
+          options.workingOnly = workingOnly
+        }
         check()
         const sourceKey = options
           ? createHash('sha256')
               .update(
                 JSON.stringify([
                   id,
+                  options.processing ?? 'legacy-sdr-v1',
+                  options.processing === 'hdr-v1' ? HDR_SOURCE_VERSION : null,
                   LENS_RENDER_VERSION,
                   CROP_POLICY,
                   rawDecoderDefinitions,
@@ -230,43 +289,66 @@ export class FullPreviews {
             ...linearEntry.linear!,
           }
           options.prepareLinear = false
+          if (workingOnly) delete options.workingAsset
         }
-        const variant = options
-          ? createHash('sha256')
-              .update(
-                JSON.stringify([
-                  id,
-                  LENS_RENDER_VERSION,
-                  CROP_POLICY,
-                  rawDecoderDefinitions,
-                  cameraProfiles,
-                  options.metadata.lensProfile.identity,
-                  options.metadata.whiteBalance?.identity,
-                  options.settings,
-                  options.adjustments ?? neutralAdjustments,
-                  ADJUSTMENT_VERSION,
-                ]),
-              )
-              .digest('hex')
-          : 'uncorrected'
+        const variant = workingOnly
+          ? `working-${sourceKey}`
+          : options
+            ? createHash('sha256')
+                .update(
+                  JSON.stringify([
+                    id,
+                    options.processing ?? 'legacy-sdr-v1',
+                    options.processing === 'hdr-v1' ? HDR_SOURCE_VERSION : null,
+                    LENS_RENDER_VERSION,
+                    CROP_POLICY,
+                    rawDecoderDefinitions,
+                    cameraProfiles,
+                    options.metadata.lensProfile.identity,
+                    options.metadata.whiteBalance?.identity,
+                    options.settings,
+                    options.adjustments ?? neutralAdjustments,
+                    options.processing === 'hdr-v1'
+                      ? [HDR_ADJUSTMENT_VERSION, HDR_OUTPUT_VERSION]
+                      : ADJUSTMENT_VERSION,
+                  ]),
+                )
+                .digest('hex')
+            : 'uncorrected'
         if (regenerate) {
           for (const entry of this.entries.values())
-            if (entry.id === id && entry.variant === variant) entry.invalid = true
+            if (
+              entry.id === id &&
+              (entry.variant === variant || (workingOnly && entry.sourceKey === sourceKey))
+            )
+              entry.invalid = true
         }
         let entry: Entry | undefined = [...this.entries.values()]
           .filter((entry) => entry.id === id && entry.variant === variant && !entry.invalid)
           .sort((a, b) => b.usedAt - a.usedAt)[0]
+        if (!entry && workingOnly && linearEntry?.linear?.hdr) entry = linearEntry
         if (entry) {
           try {
-            const file = await stat(join(entry.path, 'full.rgba'))
-            const placeholder = await stat(join(entry.path, 'placeholder.png'))
-            if (file.size !== entry.byteLength || placeholder.size !== entry.placeholderBytes)
+            if (
+              workingOnly &&
+              (await stat(join(entry.path, 'linear.f32'))).size !== entry.linear?.byteLength
+            )
+              throw new Error('Incomplete HDR source.')
+            const file = workingOnly ? { size: 0 } : await stat(join(entry.path, 'full.rgba'))
+            const placeholder = workingOnly
+              ? { size: 0 }
+              : await stat(join(entry.path, 'placeholder.png'))
+            if (
+              !workingOnly &&
+              (file.size !== entry.byteLength || placeholder.size !== entry.placeholderBytes)
+            )
               throw new Error('Incomplete preview')
           } catch {
             entry.invalid = true
             entry = undefined
           }
         }
+        const cacheHit = !!entry
         if (!entry && cachedOnly) return null
         if (!entry) {
           const revision = randomUUID()
@@ -283,17 +365,33 @@ export class FullPreviews {
               options,
             )
             check()
-            const file = await stat(join(temporary, 'full.rgba'))
-            const placeholder = await stat(join(temporary, 'placeholder.png'))
+            const file = workingOnly ? { size: 0 } : await stat(join(temporary, 'full.rgba'))
+            const placeholder = workingOnly
+              ? { size: 0 }
+              : await stat(join(temporary, 'placeholder.png'))
             if (
-              file.size !== frameByteLength(dimensions.width, dimensions.height) ||
+              file.size !==
+                (workingOnly ? 0 : frameByteLength(dimensions.width, dimensions.height)) ||
               file.size !== dimensions.byteLength ||
-              dimensions.format !== 'rgba8-srgb' ||
+              dimensions.format !== (workingOnly ? 'hdr-working' : 'rgba8-srgb') ||
               !hashPattern.test(dimensions.sha256) ||
               placeholder.size !== dimensions.placeholderBytes ||
               placeholder.size > 128 * 1024
             )
               throw new Error('The decoder produced an invalid preview.')
+            if (workingOnly) {
+              const asset = dimensions.linear?.hdr
+              if (
+                !asset ||
+                !dimensions.linear ||
+                asset.byteLength !== frameByteLength(dimensions.width, dimensions.height) * 4 ||
+                asset.sha256 !== dimensions.linear.sha256 ||
+                !hashPattern.test(asset.sha256) ||
+                (await stat(join(temporary, 'linear.f32'))).size !== asset.byteLength
+              )
+                throw new Error('The decoder produced an invalid HDR source.')
+              validateHdrSource(asset.source)
+            }
             await writeFile(
               join(temporary, 'entry.json'),
               JSON.stringify({
@@ -359,17 +457,35 @@ export class FullPreviews {
             await rm(temporary, { recursive: true, force: true })
           }
         }
-        linearEntry ??= entry.linear ? entry : undefined
+        if (workingOnly) linearEntry = entry
+        else linearEntry ??= entry.linear ? entry : undefined
         check()
         entry.usedAt = Date.now()
-        await utimes(join(entry.path, 'full.rgba'), new Date(), new Date(entry.usedAt))
+        await utimes(
+          join(entry.path, workingOnly ? 'linear.f32' : 'full.rgba'),
+          new Date(),
+          new Date(entry.usedAt),
+        )
         check()
         entry.pins++
         request.entry = entry
         await this.prune()
         check()
+        const renderId = workingOnly
+          ? `${HDR_SOURCE_VERSION}-${entry.linear!.sha256}`
+          : entry.renderId
+        if (!background)
+          this.diagnostics = {
+            photoId: id,
+            revision: options?.revision ?? 0,
+            renderingIdentity: renderId,
+            preparationBackend: entry.diagnostics?.backend,
+            cacheHit,
+            loadingStage: 'prepared',
+            timings: { ...entry.diagnostics?.timings, preparationMs: performance.now() - started },
+          }
         return {
-          adjustments: entry.adjustments,
+          adjustments: options?.adjustments ?? entry.adjustments,
           linear: linearEntry?.linear
             ? {
                 ...linearEntry.linear,
@@ -380,17 +496,22 @@ export class FullPreviews {
           appliedCorrections: entry.appliedCorrections,
           photoId: id,
           requestId: token,
-          format: entry.format,
-          byteLength: entry.byteLength,
-          sha256: entry.sha256,
-          renderId: entry.renderId,
-          placeholderUrl: `luma-photo://library/${id}/placeholder/${PREVIEW_VERSION}/${entry.revision}`,
+          format: workingOnly ? 'hdr-working' : entry.format,
+          byteLength: workingOnly ? entry.linear!.byteLength : entry.byteLength,
+          sha256: workingOnly ? entry.linear!.sha256 : entry.sha256,
+          renderId,
+          placeholderUrl: workingOnly
+            ? undefined
+            : `luma-photo://library/${id}/placeholder/${PREVIEW_VERSION}/${entry.revision}`,
           width: entry.width,
           height: entry.height,
-          url: `luma-photo://library/${id}/full/${PREVIEW_VERSION}/${entry.revision}`,
-        }
+          url: `luma-photo://library/${id}/${workingOnly ? 'linear' : 'full'}/${PREVIEW_VERSION}/${entry.revision}`,
+        } as DisplayPreview
       } catch (error) {
-        if (this.active === request) this.detach(false)
+        if (this.active === request) {
+          this.diagnostics.loadingStage = 'failed'
+          this.detach(false)
+        }
         throw error
       } finally {
         if (background) {
@@ -419,7 +540,8 @@ export class FullPreviews {
     }
     await check()
     const preview = await this.prepare(id, randomUUID(), false, false, false, true)
-    if (!preview) throw new Error('Statistics frame unavailable.')
+    if (!preview || preview.format !== 'rgba8-srgb')
+      throw new Error('Statistics frame unavailable.')
     const lease = this.acquire(new URL(preview.url))
     if (!lease) throw new Error('Statistics frame unavailable.')
     try {
@@ -451,9 +573,68 @@ export class FullPreviews {
   }
 
   settingsChanged(id: string): void {
+    for (const [job, photo] of this.analyses)
+      if (photo === id) job.abort(new Error('Statistics revision conflict.'))
     for (const job of this.background)
       if (job.id === id) job.abort.abort(new Error('Statistics revision conflict.'))
     if (this.active?.id === id) this.detach(false)
+  }
+
+  async hdrStatistics(
+    id: string,
+    expectedRevision: number,
+    domain: HdrAnalysisDomain,
+    target: DisplayTarget,
+  ): Promise<HdrPhotoStatistics> {
+    const controller = new AbortController()
+    const check = async () => {
+      controller.signal.throwIfAborted()
+      const options = await this.options?.(id, controller.signal)
+      if (
+        !Number.isSafeInteger(expectedRevision) ||
+        expectedRevision < 0 ||
+        options?.revision !== expectedRevision ||
+        options.processing !== 'hdr-v1' ||
+        this.closed ||
+        this.blocked.has(id) ||
+        !this.original(id)
+      )
+        throw new Error('HDR statistics revision conflict or processing unavailable.')
+      return options
+    }
+    await check()
+    const preview = await this.prepare(id, randomUUID(), false, false, true, true, true)
+    if (!preview?.linear?.hdr || !preview.linear.url)
+      throw new Error('HDR working data unavailable.')
+    const lease = this.acquire(new URL(preview.linear.url))
+    if (!lease) throw new Error('HDR working data unavailable.')
+    this.analyses.set(controller, id)
+    try {
+      return await this.enqueue(async () => {
+        const options = await check()
+        if (!this.processor.hdrStatistics) throw new Error('HDR analysis worker unavailable.')
+        const result = await this.processor.hdrStatistics(
+          lease.path,
+          {
+            asset: preview.linear!.hdr!,
+            adjustments: options.adjustments ?? neutralAdjustments,
+            domain,
+            target,
+          },
+          controller.signal,
+        )
+        await check()
+        return {
+          ...result,
+          photoId: id,
+          revision: expectedRevision,
+          renderingIdentity: preview.renderId,
+        }
+      })
+    } finally {
+      lease.release()
+      this.analyses.delete(controller)
+    }
   }
 
   private detach(releaseFrame = true): void {
@@ -498,7 +679,13 @@ export class FullPreviews {
     )
       return
     const entry = this.entries.get(`${id}-${revision}`)
-    if (!entry || entry.invalid || (kind === 'linear' && !entry.linear)) return
+    if (
+      !entry ||
+      entry.invalid ||
+      (kind === 'linear' && !entry.linear) ||
+      (entry.format === 'hdr-working' && kind !== 'linear')
+    )
+      return
     entry.pins++
     let released = false
     return {
@@ -524,6 +711,8 @@ export class FullPreviews {
 
   async beginRemoval(id: string): Promise<void> {
     this.blocked.add(id)
+    for (const [job, photo] of this.analyses)
+      if (photo === id) job.abort(new Error('Photo removed.'))
     for (const job of this.background)
       if (job.id === id) job.abort.abort(new Error('Photo removed.'))
     if (this.active?.id === id) this.detach()
@@ -565,6 +754,7 @@ export class FullPreviews {
   }
 
   async close(): Promise<void> {
+    for (const job of this.analyses.keys()) job.abort(new Error('Preview service closed.'))
     this.closed = true
     for (const job of this.background) job.abort.abort(new Error('Preview closed.'))
     this.detach()

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Planned.** Existing SDR adjustment formulas remain the legacy rendering path. [Shared requirements](README.md#shared-implementation-requirements) apply.
+A limited experimental Sony RAW implementation now exists; see [the versioned implementation contract](../hdr-processing.md). This brief retains the broader destination and acceptance criteria, including work deferred beyond the Linux preview milestone.
 
 ## Goal
 

@@ -138,7 +138,7 @@ fn border(q:vec2i) -> vec3i {
   for(var c=0u;c<3u;c++) { converted[c]=p.camera[c].x*f32(rgb.x)+p.camera[c].y*f32(rgb.y)+p.camera[c].z*f32(rgb.z); }
   if (p.xyz[0].w > 0.0) { textureStore(linear,q,vec4f(vec3f(rgb)/65535.0,1.0)); }
   else { textureStore(linear,q,vec4f(converted/65535.0,1.0)); }
-  let clipped=vec3u(clamp(converted,vec3f(0),vec3f(65535)));
+  let clipped=vec3u(clamp(converted*p.xyz[1].w,vec3f(0),vec3f(65535)));
   for(var c=0u;c<3u;c++) { atomicAdd(&histogram[c*8192u+(clipped[c] >> 3u)],1u); }
 }
 @compute @workgroup_size(16, 16) fn display(@builtin(global_invocation_id) id: vec3u) {

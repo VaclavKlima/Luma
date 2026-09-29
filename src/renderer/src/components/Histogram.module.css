@@ -12,7 +12,7 @@
 .plot {
   display: block;
   width: 100%;
-  height: 96px;
+  height: 112px;
   background: #141414;
   margin: 8px 0;
 }
@@ -36,4 +36,16 @@
 .indicators button[aria-pressed='true'] {
   background: #444;
   color: #fff;
+}
+
+.content details {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.content summary {
+  cursor: pointer;
+  padding: 6px 0;
+}
+.content details .indicators {
+  flex-wrap: wrap;
 }

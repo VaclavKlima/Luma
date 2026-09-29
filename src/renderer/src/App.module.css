@@ -1092,3 +1092,22 @@
   background: #383836;
   color: var(--text);
 }
+
+.filename select {
+  color: #b8b8b8;
+  background: #202020;
+  border: 1px solid #363636;
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 3px;
+  max-width: 68px;
+}
+.filename > button {
+  color: #b8b8b8;
+  background: transparent;
+  border: 1px solid #363636;
+  border-radius: 3px;
+  font-size: 10px;
+  padding: 3px 5px;
+  white-space: nowrap;
+}

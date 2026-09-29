@@ -2,7 +2,7 @@
 
 ## Status
 
-**Planned.** Current float preview assets and `LinearFrame` are bounded SDR pipeline intermediates, not durable HDR masters. [Shared roadmap requirements](README.md#shared-implementation-requirements) apply.
+A limited experimental Sony RAW implementation now exists; see [the versioned implementation contract](../hdr-processing.md). This brief retains the broader destination and acceptance criteria, including work deferred beyond the Linux preview milestone.
 
 ## Goal
 

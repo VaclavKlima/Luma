@@ -6,10 +6,12 @@ import {
 } from './white-balance'
 import { neutralAdjustments, type AdjustmentParameters } from './adjustments'
 import { automaticLensSettings, correctionKinds, type LensSettings } from './lens'
+import type { ProcessingIdentity } from './hdr'
 
-export const SETTINGS_VERSION = 5
+export const SETTINGS_VERSION = 6
 export interface EditSettings extends AdjustmentParameters {
-  version: 5
+  version: 6
+  processing: ProcessingIdentity
   whiteBalance: WhiteBalance
   lens: LensSettings
 }
@@ -17,6 +19,7 @@ export interface EditPatch extends Partial<AdjustmentParameters> {
   lens?: Partial<LensSettings>
 }
 export interface EditState {
+  hdrEligible?: boolean
   whiteBalanceProfile?: WhiteBalanceProfile
   photoId: string
   revision: number
@@ -35,6 +38,7 @@ export interface EditHistory extends EditState {
 export function initialSettings(lens = automaticLensSettings): EditSettings {
   return {
     version: SETTINGS_VERSION,
+    processing: 'legacy-sdr-v1',
     ...neutralAdjustments,
     whiteBalance: asShot,
     lens: { ...lens },

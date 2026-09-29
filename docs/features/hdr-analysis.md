@@ -2,7 +2,7 @@
 
 ## Status
 
-**Planned.** Existing 256-bin RGB statistics and clipping indicators describe SDR sRGB output only. [Shared requirements](README.md#shared-implementation-requirements) apply.
+A limited experimental Sony RAW implementation now exists; see [the versioned implementation contract](../hdr-processing.md). This brief retains the broader destination and acceptance criteria, including work deferred beyond the Linux preview milestone.
 
 ## Goal
 
@@ -10,15 +10,15 @@ Distinguish retained HDR data from target-display clipping, gamut limits, and kn
 
 ## User workflow
 
-Choose working HDR or output-rendition analysis, inspect a labeled histogram and brightness readout, and toggle clipping overlays. Moving to another display updates target diagnostics while working-data statistics remain stable for the same edit revision.
+Inspect one RGB histogram that follows the displayed output, read brightness values, and toggle clipping overlays. Explicit working-HDR and output-rendition domains remain available through MCP. Moving to another display updates target diagnostics while working-data statistics remain stable for the same edit revision.
 
 ## Controls
 
-Provide explicit analysis-domain selection, a brightness axis in stops relative to the defined white, and optional absolute nits only when a mapping exists. Label sampled versus exact results. Separate source saturation, target highlight/shadow clipping, and gamut warnings. Use keyboard-readable bin values, patterns/text in addition to overlay colors, and scoped preview shortcuts.
+Use encoded SDR RGB bins, with an equal-width logarithmic HDR extension, a reference-white divider, and display-limit markings on HDR targets. Keep explicit analysis-domain selection in MCP. Absolute nits remain unavailable unless a calibrated mapping exists. Label sampled versus exact results. Separate source saturation, target highlight/shadow clipping, and gamut warnings. Use keyboard-readable bin values, patterns/text in addition to overlay colors, and scoped preview shortcuts.
 
 ## Processing approach
 
-Working histograms operate on retained float values, never reconstruct HDR from the SDR frame. Research log-luminance bins and optional RGB distributions, declaring bin edges, zero/negative/nonfinite handling, alpha inclusion, and percentile interpolation. Values beyond the displayed plot require overflow counts rather than silent clipping. Brightness readouts identify their domain and reference.
+Working histograms operate on retained float values, never reconstruct HDR from the SDR frame. Preserve the log-luminance statistics alongside a separately versioned output RGB descriptor, declaring bin edges, zero/negative/nonfinite handling, alpha inclusion, and percentile interpolation. Values beyond the displayed plot require overflow counts rather than silent clipping. Brightness readouts identify their domain and reference.
 
 Target clipping follows the chosen tone/gamut transform and target descriptor. Sensor saturation is reported only when decoder data supports it; for imported HDR or deghosted merge regions it may be unknown or provenance-dependent. An above-white value is not inherently clipped. Keep source, working, and display metrics independently named.
 

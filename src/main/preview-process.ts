@@ -1,4 +1,6 @@
 import type { ImageStatistics } from '../shared/statistics'
+import type { HdrStatistics } from '../shared/hdr-statistics'
+import type { HdrStatisticsJob } from './preview-types'
 import type { ProcessingMetadata, ProcessingOptions } from '../shared/lens'
 import { fork, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -96,6 +98,20 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
     )
   }
 
+  hdrStatistics(path: string, job: HdrStatisticsJob, signal: AbortSignal): Promise<HdrStatistics> {
+    return this.run<HdrStatistics>('statistics', path, '', signal, undefined, {
+      width: job.asset.width,
+      height: job.asset.height,
+      sha256: job.asset.sha256,
+      hdr: job,
+    }).finally(() => {
+      this.idle = setTimeout(() => {
+        void this.close()
+      }, 30_000)
+      this.idle.unref()
+    })
+  }
+
   releaseFrame(): void {
     if (!this.busy && this.child?.connected) this.child.send({ type: 'release' }, () => {})
   }
@@ -106,7 +122,7 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
     output: string,
     signal: AbortSignal,
     options?: ProcessingOptions,
-    frame?: { width: number; height: number; sha256: string },
+    frame?: { width: number; height: number; sha256: string; hdr?: HdrStatisticsJob },
   ): Promise<T> {
     signal.throwIfAborted()
     clearTimeout(this.idle)

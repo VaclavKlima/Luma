@@ -18,6 +18,7 @@ export interface CameraProfile {
  * Buffers are owned copies, never views into a decoder's disposable native memory.
  */
 export interface LinearFrame {
+  normalization?: import('../../shared/hdr').HdrNormalization
   data: Float32Array<ArrayBuffer>
   width: number
   height: number
@@ -30,6 +31,7 @@ export interface WhiteBalanceProvider {
   resolve(metadata: RawMetadata): WhiteBalanceProfile | null
 }
 export interface RawMetadata {
+  hdrEligible?: boolean
   color?: Pick<WhiteBalanceProfile, 'asShotGains' | 'xyzToCamera' | 'cameraToWorking'>
   make: string
   model: string
@@ -44,8 +46,8 @@ export interface RawSession {
   metadata: RawMetadata
   dimensions: { width: number; height: number; flip: number }
   unpack(): void
-  gpuSource(): RawSource | null
-  linear(): LinearFrame
+  gpuSource(hdr?: boolean): RawSource | null
+  linear(hdr?: boolean): LinearFrame
   display(halfSize?: boolean): { data: Uint8Array; width: number; height: number }
   close(): void
 }

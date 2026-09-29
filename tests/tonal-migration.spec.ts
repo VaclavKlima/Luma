@@ -65,7 +65,8 @@ test('catalog v6 migration preserves highlights, every snapshot and redo transac
       ...original,
       settings: {
         ...original.settings,
-        version: 5,
+        version: 6,
+        processing: 'legacy-sdr-v1',
         whiteBalance: { mode: 'as-shot' },
         shadows: 0,
         whites: 0,
@@ -75,7 +76,8 @@ test('catalog v6 migration preserves highlights, every snapshot and redo transac
         ...snapshot,
         settings: {
           ...snapshot.settings,
-          version: 5,
+          version: 6,
+          processing: 'legacy-sdr-v1',
           whiteBalance: { mode: 'as-shot' },
           shadows: 0,
           whites: 0,
@@ -84,7 +86,7 @@ test('catalog v6 migration preserves highlights, every snapshot and redo transac
       })),
     }
     expect(await library.getEditHistory(id)).toEqual(expected)
-    expect(db.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 8 })
+    expect(db.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 9 })
     expect(await library.redoEdit(id, 9)).toMatchObject({
       revision: 10,
       settings: { shadows: 0, whites: 0, blacks: 0, exposureEv: -2, contrast: 30, highlights: 30 },

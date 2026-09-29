@@ -181,7 +181,9 @@ test('migrates v1 and reconciles interrupted removals without erasing OS-restore
     const library = join(t.root, 'library')
     const db = new DatabaseSync(join(library, 'catalog.sqlite'))
     // Simulate the old schema, then exercise the real migration.
-    db.exec('DROP TABLE removals; PRAGMA user_version = 1;')
+    db.exec(
+      'DROP TABLE removals; ALTER TABLE photos DROP COLUMN processing_identity; PRAGMA user_version = 1;',
+    )
     db.close()
     const migrated = new PhotoLibrary(library, preview, () => {})
     await migrated.open()
@@ -219,7 +221,7 @@ test('migrates v1 and reconciles interrupted removals without erasing OS-restore
       )
       const check = new DatabaseSync(join(library, 'catalog.sqlite'))
       expect(check.prepare('SELECT * FROM removals').all()).toEqual([])
-      expect(check.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 8 })
+      expect(check.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 9 })
       check.close()
     } finally {
       await recovered.close()

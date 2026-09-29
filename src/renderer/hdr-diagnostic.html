@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'"
+    />
+    <title>Luma HDR diagnostic</title>
+  </head>
+  <body>
+    <main>
+      <h1>HDR display diagnostic</h1>
+      <p>Unverified output · synthetic patches · no photo library</p>
+      <div class="controls">
+        <label
+          >Preview
+          <select id="mode">
+            <option value="auto">Auto</option>
+            <option value="hdr">HDR</option>
+            <option value="sdr">SDR</option>
+          </select></label
+        >
+        <label
+          >Canvas gamut
+          <select id="gamut">
+            <option value="srgb">sRGB</option>
+            <option value="display-p3">Display-P3</option>
+          </select></label
+        >
+        <button id="retry">Recheck display</button>
+        <button id="lose">Simulate device loss</button>
+        <span class="white" aria-label="SDR interface white reference"></span
+        ><span>SDR UI white</span>
+      </div>
+      <p id="status" role="status">Probing display…</p>
+      <div class="levels">
+        <span></span><span>0×</span><span>0.18×</span><span>1×</span><span>2×</span><span>4×</span
+        ><span>16×</span>
+      </div>
+      <div class="patches">
+        <div class="rows">
+          <span>Neutral</span><span>Red</span><span>Green</span><span>Blue</span>
+        </div>
+        <canvas
+          id="patches"
+          width="900"
+          height="300"
+          aria-label="Neutral and color patches in columns of increasing relative brightness"
+        ></canvas>
+      </div>
+      <p>
+        Patch levels are linear multiples of reference white, encoded once. HDR preserves the
+        submitted ladder; the display may limit it. SDR clamps at 1×. Nit values require a meter.
+      </p>
+      <details>
+        <summary>Capability and presentation report</summary>
+        <pre id="report"></pre>
+      </details>
+    </main>
+    <script type="module" src="/src/hdr-diagnostic.ts"></script>
+  </body>
+</html>

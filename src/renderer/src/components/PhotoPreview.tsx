@@ -1,3 +1,10 @@
+import { useHdrPixel } from '../hooks/useHdrPixel'
+import { useHdrAnalysis } from '../hooks/useHdrAnalysis'
+import { SDR_TARGET } from '../../../shared/hdr'
+import type { DisplayTarget } from '../../../shared/hdr'
+import { HdrPresenter } from '../preview/hdr-presenter'
+import { HdrCpuPresenter } from '../preview/hdr-cpu-presenter'
+import { hdrPresentationMemory, HDR_PRESENTATION_BUDGET } from '../preview/hdr-memory'
 import { neutralAdjustments } from '../../../shared/adjustments'
 import type { PreviewTools } from '../hooks/usePreviewTools'
 import { usePreviewAnalysis, type ClippingMask } from '../hooks/usePreviewAnalysis'
@@ -6,6 +13,7 @@ import { PreviewPresenter } from '../preview/presenter'
 import { useWorkingPreview } from '../hooks/useWorkingPreview'
 import {
   useCallback,
+  useMemo,
   useEffect,
   useRef,
   useState,
@@ -38,6 +46,7 @@ interface Model {
   view: View
 }
 interface Props {
+  displayTarget: DisplayTarget
   tools: PreviewTools
   gesturing: boolean
   adjustments: AdjustmentParameters
@@ -52,6 +61,7 @@ interface Props {
 
 // The parent keys this component by photo ID so every new photograph starts in Fit.
 export function PhotoPreview({
+  displayTarget,
   photo,
   adjustments,
   tools,
@@ -63,6 +73,7 @@ export function PhotoPreview({
   onImport,
   onContextMenu,
 }: Props) {
+  const initialTarget = useRef(displayTarget)
   const overlay = useRef<HTMLCanvasElement>(null)
   const divider = useRef<HTMLDivElement>(null)
   const dividerPointer = useRef<number | null>(null)
@@ -88,15 +99,35 @@ export function PhotoPreview({
   const full = useFullPreview(photo?.id)
   const [displayedUrl, setDisplayedUrl] = useState('')
   const [fallback, setFallback] = useState(false)
-  const presenter = useRef<PreviewPresenter | null>(null)
-  const fullVisible = Boolean(full.preview && displayedUrl)
+  const presenter = useRef<PreviewPresenter | HdrPresenter | HdrCpuPresenter | null>(null)
+  const [hdrReady, setHdrReady] = useState(false)
+  const selectedAt = useRef(0)
+  const firstPresentedMs = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    selectedAt.current = performance.now()
+    firstPresentedMs.current = undefined
+  }, [photo?.id])
+  const fallbackReason = useRef('')
+  const fullVisible = Boolean(full.preview && (displayedUrl || full.preview.linear?.hdr))
   const live = useWorkingPreview(full.preview, fullVisible)
   const { working, generation } = live
   const { mode, split, analyze, update } = tools
+  const actualTarget = useMemo(
+    () =>
+      fallback
+        ? {
+            ...SDR_TARGET,
+            generation: displayTarget.generation,
+            requested: displayTarget.requested,
+          }
+        : displayTarget,
+    [fallback, displayTarget],
+  )
+  const hdrOverlay = tools.domain === 'working-hdr' ? tools.hdrOverlay & 4 : tools.hdrOverlay
   const shadows = tools.shadows || tools.hover === 'shadows'
   const highlights = tools.highlights || tools.hover === 'highlights'
   usePreviewAnalysis(
-    working,
+    working?.hdr ? null : working,
     `${photo?.id}-${working?.identity ?? 'pending'}-${generation}`,
     mode === 'before' ? neutralAdjustments : adjustments,
     shadows || highlights,
@@ -104,9 +135,69 @@ export function PhotoPreview({
     analyze,
     setMask,
   )
+  const analysisError = useHdrAnalysis(
+    hdrReady ? working : null,
+    mode === 'before' ? neutralAdjustments : adjustments,
+    actualTarget,
+    'output',
+    !!hdrOverlay,
+    analyze,
+    setMask,
+  )
   useEffect(() => {
     if (gesturing && mode === 'before') update({ mode: 'after' })
   }, [gesturing, mode, update])
+  const pixel = useHdrPixel(
+    working,
+    mode === 'before' ? neutralAdjustments : adjustments,
+    actualTarget,
+    tools.domain,
+  )
+  useEffect(() => update({ hdr: !!working?.hdr }), [working?.hdr, update])
+  useEffect(() => {
+    const preview = full.preview
+    if (!preview) return
+    const ready = working?.hdr ? hdrReady : !!displayedUrl
+    let cancelled = false
+    const report = () => {
+      if (cancelled) return
+      if (ready) firstPresentedMs.current ??= performance.now() - selectedAt.current
+      void window.luma.reportPreviewPresentation({
+        photoId: preview.photoId,
+        revision: preview.settingsRevision ?? 0,
+        targetGeneration: displayTarget.generation,
+        backend: working?.hdr ? (fallback ? 'canvas2d-hdr-sdr' : 'webgpu-hdr') : 'legacy',
+        mode: working?.hdr && !fallback ? displayTarget.mode : 'sdr',
+        stage: ready ? 'presented' : 'loading',
+        reason: working?.hdr
+          ? fallback
+            ? fallbackReason.current
+            : displayTarget.reason
+          : 'Legacy SDR processing.',
+        timings: ready
+          ? {
+              ...JSON.parse(image.current?.dataset.loadTimings ?? '{}'),
+              selectionToPresentedMs: firstPresentedMs.current!,
+              uploadMs: Number(image.current?.dataset.uploadMs ?? 0),
+            }
+          : {},
+      })
+    }
+    if (ready) requestAnimationFrame(() => requestAnimationFrame(report))
+    else report()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    full.preview,
+    working?.hdr,
+    hdrReady,
+    displayedUrl,
+    fallback,
+    displayTarget.generation,
+    displayTarget.mode,
+    displayTarget.reason,
+  ])
   const editingSurface = !!working
   const placeholderView = constrain(model.view, full.placeholder ?? model.image, model.viewport)
   const [dragging, setDragging] = useState(false)
@@ -201,24 +292,39 @@ export function PhotoPreview({
     const canvas = image.current
     if (!canvas) return
     try {
-      presenter.current = new PreviewPresenter(canvas, fallback || !editingSurface, () =>
-        setFallback(true),
-      )
+      if (working?.hdr) {
+        // A replacement surface has no validated pixels yet.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setHdrReady(false)
+        presenter.current = fallback
+          ? new HdrCpuPresenter(canvas, () => setHdrReady(true), displayFailed)
+          : new HdrPresenter(
+              canvas,
+              initialTarget.current,
+              (reason) => {
+                fallbackReason.current = reason.slice(0, 512)
+                setFallback(true)
+              },
+              () => setHdrReady(true),
+            )
+      } else
+        presenter.current = new PreviewPresenter(canvas, fallback || !editingSurface, () =>
+          setFallback(true),
+        )
     } catch {
       // Canvas capability checks can require replacing the DOM canvas with a 2D surface.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setFallback(true)
     }
     return () => {
       presenter.current?.dispose()
       presenter.current = null
     }
-  }, [fallback, generation, editingSurface])
+  }, [fallback, generation, editingSurface, working?.hdr, displayFailed])
 
   useEffect(() => {
-    if (!renderedFrame || !pixels || !presenter.current) return
+    if (!renderedFrame || (!pixels && !renderedFrame.linear?.hdr) || !presenter.current) return
     try {
-      if (!editingSurface || fallback) presenter.current.setBitmap(pixels)
+      if (pixels && (!editingSurface || fallback)) presenter.current.setBitmap(pixels)
       const dimensions = { width: renderedFrame.width, height: renderedFrame.height }
       // The decoded frame establishes authoritative dimensions after presentation upload.
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -246,6 +352,47 @@ export function PhotoPreview({
     }
     return () => onEditingReady(null)
   }, [working, fallback, generation, photo?.id, onEditingReady])
+
+  useEffect(() => {
+    if (
+      working?.hdr &&
+      displayTarget.capabilities?.hardware &&
+      displayTarget.capabilities.extended &&
+      fallback
+    ) {
+      // A new capability probe allows recovery after device loss.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFallback(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- A failed presenter waits for a fresh capability generation.
+  }, [
+    displayTarget.generation,
+    displayTarget.capabilities?.hardware,
+    displayTarget.capabilities?.extended,
+    working?.hdr,
+  ])
+  useEffect(() => {
+    if (presenter.current instanceof HdrPresenter || presenter.current instanceof HdrCpuPresenter)
+      presenter.current.setTarget(displayTarget)
+  }, [displayTarget, working, fallback])
+
+  useEffect(() => {
+    if (!fallback || !working?.hdr || !fallbackReason.current.includes('memory limit')) return
+    const dpr = window.devicePixelRatio || 1
+    if (
+      hdrPresentationMemory(
+        working.width,
+        working.height,
+        Math.round(model.viewport.width * dpr),
+        Math.round(model.viewport.height * dpr),
+      ).total <= HDR_PRESENTATION_BUDGET
+    ) {
+      // A smaller viewport can recover without changing the photograph or display target.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFallback(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Retry only when allocation dimensions change.
+  }, [model.viewport.width, model.viewport.height, working?.width, working?.height])
 
   useEffect(() => {
     const started = performance.now()
@@ -325,10 +472,14 @@ export function PhotoPreview({
       for (let x = 0; x < width; x++) {
         const bits = level.data[(sy + y) * level.width + sx + x],
           i = (y * width + x) * 4
-        if (highlights && bits & 2) {
+        if (working.hdr && bits & hdrOverlay) {
+          pixels[i] = 255
+          pixels[i + 1] = 160
+          pixels[i + 3] = (x + y) % 4 < 2 ? 220 : 140
+        } else if (!working.hdr && highlights && bits & 2) {
           pixels[i] = 255
           pixels[i + 3] = 180
-        } else if (shadows && bits & 1) {
+        } else if (!working.hdr && shadows && bits & 1) {
           pixels[i + 2] = 255
           pixels[i + 3] = 180
         }
@@ -349,7 +500,7 @@ export function PhotoPreview({
       height * pixelHeight,
     )
     context.restore()
-  }, [mask, model, mode, split, shadows, highlights, working])
+  }, [mask, model, mode, split, shadows, highlights, working, hdrOverlay])
 
   function fit() {
     stopDrag()
@@ -432,6 +583,18 @@ export function PhotoPreview({
     setDragging(true)
   }
   function pointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (event.altKey && !event.buttons && working?.hdr) {
+      const box = event.currentTarget.getBoundingClientRect()
+      const m = current.current
+      pixel.inspect(
+        (event.clientX - box.left - m.viewport.width / 2 - m.view.x) / m.view.scale +
+          m.image.width / 2,
+        (event.clientY - box.top - m.viewport.height / 2 - m.view.y) / m.view.scale +
+          m.image.height / 2,
+        mode === 'before' ||
+          (mode === 'split' && event.clientX - box.left < m.viewport.width * split),
+      )
+    }
     const pointer = drag.current
     if (!pointer || pointer.id !== event.pointerId) return
     if (!(event.buttons & 1)) {
@@ -513,7 +676,10 @@ export function PhotoPreview({
                 style={{
                   width: model.viewport.width || undefined,
                   height: model.viewport.height || undefined,
-                  visibility: fullVisible && ready ? 'visible' : 'hidden',
+                  visibility:
+                    fullVisible && ready && (!full.preview?.linear?.hdr || hdrReady)
+                      ? 'visible'
+                      : 'hidden',
                 }}
               />
               <canvas
@@ -597,7 +763,7 @@ export function PhotoPreview({
                   }}
                 />
               )}
-              {!fullVisible && (
+              {(!fullVisible || (!!full.preview?.linear?.hdr && !hdrReady)) && (
                 <div className={styles.message} role={full.error ? 'alert' : 'status'}>
                   {full.error ? (
                     <span>Could not load this preview.</span>
@@ -637,7 +803,7 @@ export function PhotoPreview({
               title={
                 full.error ??
                 (fullVisible
-                  ? `${model.image.width} × ${model.image.height} · sRGB · Original preserved`
+                  ? `${model.image.width} × ${model.image.height} · ${working?.hdr ? 'Rec.2020 linear working data' : 'sRGB'} · Original preserved`
                   : 'Loading the full-resolution image.')
               }
             >
@@ -667,6 +833,26 @@ export function PhotoPreview({
           </div>
         )}
       </div>
+      {working?.hdr && (
+        <div className={styles.pixelReadout}>
+          {analysisError && <span role="status">Analysis unavailable: {analysisError}</span>}
+          <button
+            onClick={() =>
+              pixel.inspect(
+                model.image.width / 2 - model.view.x / model.view.scale,
+                model.image.height / 2 - model.view.y / model.view.scale,
+                mode === 'before' || (mode === 'split' && split > 0.5),
+              )
+            }
+          >
+            Inspect center pixel
+          </button>
+          <output>
+            {pixel.readout ||
+              'Alt-hover to inspect a pixel. Brightness is relative to reference white.'}
+          </output>
+        </div>
+      )}
       <div className={`${layout.canvasToolbar} ${styles.toolbar}`}>
         <div className={layout.photoPagination}>
           <button
@@ -734,9 +920,11 @@ export function PhotoPreview({
         </div>
         <div className={layout.canvasInfo}>
           <Monitor size={12} />
-          <span>sRGB</span>
+          <span>
+            {working?.hdr ? (fallback ? 'sRGB · SDR fallback' : displayTarget.colorSpace) : 'sRGB'}
+          </span>
           <span className={layout.toolbarDivider} />
-          <span>8-bit</span>
+          <span>{working?.hdr && !fallback ? 'Float32' : '8-bit'}</span>
         </div>
       </div>
     </section>

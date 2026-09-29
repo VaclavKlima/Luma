@@ -2,6 +2,29 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { AppInfo, LibraryEvent, LumaApi } from '../shared/contracts'
 
 const api: LumaApi = {
+  getPreviewDiagnostics: () => ipcRenderer.invoke('preview:diagnostics'),
+  reportPreviewPresentation: (value) => ipcRenderer.invoke('preview:presentation', value),
+  getDisplayState: () => ipcRenderer.invoke('display:get'),
+  setPreviewPreference: (preference) => ipcRenderer.invoke('display:preference', preference),
+  reportDisplayCapabilities: (capabilities) =>
+    ipcRenderer.invoke('display:capabilities', capabilities),
+  onDisplayState: (listener) => {
+    const handler = (_: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
+      listener(state)
+    ipcRenderer.on('display:state', handler)
+    return () => {
+      ipcRenderer.removeListener('display:state', handler)
+    }
+  },
+  onDisplayRefresh: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('display:refresh', handler)
+    return () => {
+      ipcRenderer.removeListener('display:refresh', handler)
+    }
+  },
+  upgradePhotoProcessing: (id, revision) =>
+    ipcRenderer.invoke('edits:upgrade-processing', id, revision),
   onFlushEdits: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, token: string) => {
       void listener().then(
@@ -14,8 +37,12 @@ const api: LumaApi = {
       ipcRenderer.removeListener('edits:flush', handler)
     }
   },
-  getPhotoStatistics: async (id, revision) => {
-    const result = await ipcRenderer.invoke('statistics:get', id, revision)
+  getPhotoStatistics: async (
+    id: string,
+    revision: number,
+    request?: import('../shared/hdr-statistics').HdrAnalysisRequest,
+  ) => {
+    const result = await ipcRenderer.invoke('statistics:get', id, revision, request)
     if (result.error) throw new Error(result.error)
     return result.statistics
   },
@@ -30,6 +57,11 @@ const api: LumaApi = {
   listPhotos: (offset = 0) => ipcRenderer.invoke('library:list', offset),
   locatePhoto: (id, direction = 0) => ipcRenderer.invoke('library:locate', id, direction),
   getPhotoRange: (from, to) => ipcRenderer.invoke('library:range', from, to),
+  requestHdrPreview: async (id, token, regenerate = false) => {
+    const result = await ipcRenderer.invoke('preview:hdr', id, token, regenerate)
+    if (result.error) throw new Error(result.error)
+    return result.preview
+  },
   requestEditingPreview: async (id, token) => {
     const result = await ipcRenderer.invoke('preview:editing', id, token)
     if (result.error) throw new Error(result.error)

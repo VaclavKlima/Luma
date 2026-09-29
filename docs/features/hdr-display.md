@@ -2,7 +2,7 @@
 
 ## Status
 
-**Planned.** Current WebGL2/Canvas2D presentation is SDR. Native Dawn computation does not establish HDR output through Electron. [Shared requirements](README.md#shared-implementation-requirements) apply.
+Experimental Sony RAW HDR presentation is implemented alongside the legacy SDR path. See [the implementation contract](../hdr-processing.md) and [isolated diagnostic](../hdr-diagnostic.md). Linux Wayland has hardware API and user visual evidence. Physical luminance is unmeasured; MacBook Pro M4 and Windows remain unverified. The product is not certified or calibrated HDR output.
 
 ## Goal
 

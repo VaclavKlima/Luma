@@ -1,4 +1,5 @@
 import { PreviewEngine } from './preview-engine'
+import { scanHdr } from './processing/hdr-processing'
 import type { PreviewWorkerRequest, PreviewWorkerResponse } from './preview-types'
 
 function send(message: PreviewWorkerResponse) {
@@ -31,7 +32,9 @@ process.on('message', async (data: PreviewWorkerRequest) => {
   try {
     const result =
       data.type === 'statistics'
-        ? await engine.statistics(data.path, data.frame!)
+        ? data.frame?.hdr
+          ? await scanHdr(data.path, data.frame.hdr)
+          : await engine.statistics(data.path, data.frame!)
         : data.type === 'metadata'
           ? await engine.inspect(data.path)
           : data.type === 'full'

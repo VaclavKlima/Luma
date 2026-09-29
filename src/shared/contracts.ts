@@ -1,6 +1,9 @@
+import type { HdrAnalysisRequest, HdrPhotoStatistics } from './hdr-statistics'
 import type { PhotoStatistics } from './statistics'
 import type { AdjustmentParameters } from './adjustments'
 import type { DisplayTransform } from './adjustments'
+import type { HdrWorkingAsset, DisplayTarget, DisplayCapabilities } from './hdr'
+import type { PreviewPreference } from './hdr-display'
 import type { EditState, EditPatch, EditHistory } from './edits'
 import type { CorrectionKind, LensSettings, LensState } from './lens'
 export interface AppInfo {
@@ -9,8 +12,23 @@ export interface AppInfo {
 }
 
 export interface LumaApi {
+  getPreviewDiagnostics(): Promise<import('./preview-diagnostics').PreviewDiagnostics>
+  reportPreviewPresentation(
+    value: import('./preview-diagnostics').PreviewPresentation,
+  ): Promise<void>
+  getDisplayState(): Promise<DisplayTarget>
+  setPreviewPreference(preference: PreviewPreference): Promise<DisplayTarget>
+  reportDisplayCapabilities(capabilities: DisplayCapabilities): Promise<DisplayTarget>
+  onDisplayState(listener: (state: DisplayTarget) => void): () => void
+  onDisplayRefresh(listener: () => void): () => void
+  upgradePhotoProcessing(photoId: string, expectedRevision: number): Promise<EditState>
   onFlushEdits(listener: () => Promise<void>): () => void
   getPhotoStatistics(photoId: string, expectedRevision: number): Promise<PhotoStatistics>
+  getPhotoStatistics(
+    photoId: string,
+    expectedRevision: number,
+    request: HdrAnalysisRequest,
+  ): Promise<HdrPhotoStatistics>
   getEdits(photoId: string): Promise<EditState>
   updateEdits(photoId: string, patch: EditPatch, expectedRevision: number): Promise<EditState>
   getEditHistory(photoId: string): Promise<EditHistory>
@@ -22,6 +40,11 @@ export interface LumaApi {
   listPhotos(offset?: number): Promise<PhotoPage>
   locatePhoto(id: string, direction?: -1 | 0 | 1): Promise<PhotoLocation | null>
   getPhotoRange(fromId: string, toId: string): Promise<PhotoReference[]>
+  requestHdrPreview(
+    photoId: string,
+    requestId: string,
+    regenerate?: boolean,
+  ): Promise<HdrPreview | null>
   requestEditingPreview(photoId: string, requestId: string): Promise<FullPreview>
   requestFullPreview(photoId: string, requestId: string, regenerate?: boolean): Promise<FullPreview>
   requestCachedFullPreview(photoId: string, requestId: string): Promise<FullPreview | null>
@@ -64,11 +87,18 @@ export interface Photo extends PhotoMetadata {
 }
 
 export interface LinearAsset {
+  hdr?: HdrWorkingAsset
   url?: string
   byteLength: number
   sha256: string
   transform: DisplayTransform
 }
+export interface HdrPreview extends Omit<FullPreview, 'format'> {
+  format: 'hdr-working'
+  linear: LinearAsset & { hdr: HdrWorkingAsset; url: string }
+}
+export type DisplayPreview = FullPreview | HdrPreview
+
 export interface FullPreview {
   adjustments?: AdjustmentParameters
   linear?: LinearAsset

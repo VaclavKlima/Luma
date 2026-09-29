@@ -23,7 +23,7 @@ The default interface will be dark and color-neutral: a large preview in the cen
 
 The complete HDR destination includes exposure merging: RAW brackets or supported HDR files → nondestructive HDR editing → HDR and SDR preview → HDR and SDR export. Single RAW photographs also use this HDR processing foundation. Exposure merging follows the processing and display foundations as a staged milestone; the complete destination is not finished until merging and file interoperability are verified. The [feature roadmap and implementation briefs](docs/features/README.md) define this order and its acceptance gates.
 
-These are planned capabilities. The current application provides a managed library, persisted light adjustments, verified Sony RAW white balance and lens corrections, shared history, and SDR preview analysis. Its RGBA8 sRGB display frames and bounded floating-point preview assets are not HDR editing masters. HDR merging, true HDR presentation, and export are not implemented; the console remains read-only.
+These are planned capabilities. The current application provides a managed library, persisted light adjustments, verified Sony RAW white balance and lens corrections, shared history, and preview analysis. A separate experimental Sony RAW path now provides scene-linear Rec.2020 working assets and HDR/SDR presentation; legacy photographs retain the existing SDR path. Physical output and non-Linux platforms remain unverified. HDR merging, HDR file import, and export are not implemented; the console remains read-only.
 
 Generative retouching, automatic masking, and cloud synchronization belong to later releases.
 

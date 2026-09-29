@@ -19,7 +19,9 @@ test('every spec is assigned once; fast checks exclude services, Electron, RAW a
   expect(fast.groups.map((group) => group.name)).toEqual(['node'])
   expect(fast.build).toBe(false)
   expect(fast.mcp).toBe(false)
-  expect(files(['--full'])).toHaveLength(specs.length - 2)
+  expect(files(['--full'])).toHaveLength(
+    specs.length - suites.filter((suite) => suite.group === 'benchmark').length,
+  )
   expect(selectPlan(['--full']).mcp).toBe(true)
 })
 

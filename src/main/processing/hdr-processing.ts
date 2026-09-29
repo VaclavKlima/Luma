@@ -1,0 +1,348 @@
+import { createHash } from 'node:crypto'
+import { open, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import sharp from 'sharp'
+import { analyzeHdr, hdrStatistics } from '../../shared/hdr-statistics'
+import type { HdrStatisticsJob } from '../preview-types'
+import { rawDecoder } from './decoders'
+import { cameraProfile } from './cameras'
+import { correctionPlan, cubic, radial } from './lens-correction'
+import { displayTransform } from '../gpu/raw-source'
+import type { RawGpuRenderer } from '../gpu/raw-renderer'
+import type { LinearFrame } from './contracts'
+import type { ProcessingOptions } from '../../shared/lens'
+import type { FullPreviewResult } from '../preview-types'
+import { frameByteLength } from '../../shared/preview-frame'
+import { neutralAdjustments, srgbTransform } from '../../shared/adjustments'
+import {
+  validateHdrSource,
+  HDR_SOURCE_VERSION,
+  HDR_OUTPUT_VERSION,
+  HDR_ADJUSTMENT_VERSION,
+  SRGB_TO_2020,
+  matrixRgb,
+  hdrWhiteBalance,
+  hdrAdjustmentMatrix,
+  adjustHdr,
+  outputHdr,
+  encodeHdr,
+  SDR_TARGET,
+  type HdrWorkingAsset,
+  type RGB,
+} from '../../shared/hdr'
+
+const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
+export async function scanHdr(path: string, job: HdrStatisticsJob) {
+  const result = hdrStatistics(job.domain, job.target, job.asset)
+  for await (const data of readHdrStrips(path, job.asset))
+    analyzeHdr(data, job.adjustments, job.asset, job.target, result)
+  return result
+}
+
+/** Disk strips keep corrections, presentation and analysis independent of full float copies. */
+export async function* readHdrStrips(path: string, asset: HdrWorkingAsset) {
+  validateHdrSource(asset?.source)
+  if (
+    asset.kind !== 'hdr-working-v1' ||
+    asset.source.processing !== 'hdr-v1' ||
+    asset.byteLength !== frameByteLength(asset.width, asset.height) * 4 ||
+    asset.byteLength > 512 * 1024 ** 2 ||
+    asset.strips.length !== Math.ceil(asset.height / 64)
+  )
+    throw new Error('Invalid HDR asset.')
+  const file = await open(path, 'r')
+  const digest = createHash('sha256')
+  let offset = 0
+  try {
+    if ((await file.stat()).size !== asset.byteLength) throw new Error('Incomplete HDR asset.')
+    for (const strip of asset.strips) {
+      const expected = Math.min(64 * asset.width * 16, asset.byteLength - offset)
+      if (strip.byteLength !== expected) throw new Error('Invalid HDR strip size.')
+      const bytes = Buffer.alloc(expected)
+      let read = 0
+      while (read < expected) {
+        const result = await file.read(bytes, read, expected - read, offset + read)
+        if (!result.bytesRead) throw new Error('Incomplete HDR strip.')
+        read += result.bytesRead
+      }
+      if (sha(bytes) !== strip.sha256) throw new Error('Damaged HDR strip.')
+      digest.update(bytes)
+      const data = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4)
+      for (let i = 0; i < data.length; i++)
+        if (!Number.isFinite(data[i]) || (i % 4 === 3 && (data[i] < 0 || data[i] > 1)))
+          throw new Error('Invalid HDR pixels.')
+      yield data
+      offset += expected
+    }
+    if (offset !== asset.byteLength || digest.digest('hex') !== asset.sha256)
+      throw new Error('Damaged HDR asset.')
+  } finally {
+    await file.close()
+  }
+}
+
+async function prepare(
+  path: string,
+  output: string,
+  options: ProcessingOptions,
+  gpu: Pick<RawGpuRenderer, 'render' | 'releaseFrame'>,
+  backend: string,
+) {
+  const decoder = rawDecoder(path)
+  if (!decoder) throw new Error('HDR processing requires a verified Sony RAW.')
+  const session = await decoder.open(path)
+  let frame: LinearFrame
+  let gpuPrepared = false
+  let gpuPlan: ReturnType<typeof correctionPlan> | undefined
+  let actualBackend: 'cpu' | 'gpu' = 'cpu'
+  let fallback: string | undefined
+  const profile = cameraProfile(session.metadata.make, session.metadata.model)
+  try {
+    if (!session.metadata.hdrEligible)
+      throw new Error('HDR processing is unavailable for this RAW mode.')
+    session.unpack()
+    const source = backend !== 'cpu' ? session.gpuSource(true) : null
+    if (source?.normalization) {
+      try {
+        gpuPlan = correctionPlan(
+          source.width,
+          source.height,
+          options.metadata.lensProfile,
+          options.settings,
+        )
+        const rendered = await gpu.render(source, gpuPlan, neutralAdjustments, true)
+        if (!rendered.working || !rendered.hdrPrepared) throw new Error('GPU HDR data unavailable.')
+        frame = {
+          data: rendered.working.data,
+          width: rendered.width,
+          height: rendered.height,
+          flip: 0,
+          matrix: [],
+          normalization: source.normalization,
+        }
+        gpuPrepared = true
+        actualBackend = 'gpu'
+      } catch (error) {
+        fallback = String(error)
+        frame = session.linear(true)
+      }
+    } else frame = session.linear(true)
+  } finally {
+    session.close()
+    gpu.releaseFrame()
+  }
+  if (!frame.normalization || !profile) throw new Error('Missing HDR normalization.')
+  const normal = frame.normalization
+  const histogram = new Uint32Array(3 * 8192)
+  // The legacy neutral-source white policy is measured once, before lens and user edits.
+  for (let i = 0; !gpuPrepared && i < frame.data.length; i += 4)
+    for (let c = 0; c < 3; c++) {
+      const v =
+        (frame.matrix[c * 4] * frame.data[i] +
+          frame.matrix[c * 4 + 1] * frame.data[i + 1] +
+          frame.matrix[c * 4 + 2] * frame.data[i + 2]) *
+        normal.restoreGain
+      histogram[c * 8192 + (Math.max(0, Math.min(65535, Math.trunc(v * 65535))) >> 3)]++
+    }
+  if (!gpuPrepared)
+    normal.referenceWhite = displayTransform(histogram, frame.width * frame.height).white
+  const plan = gpuPrepared
+    ? { ...gpuPlan!, width: frame.width, height: frame.height }
+    : correctionPlan(frame.width, frame.height, options.metadata.lensProfile, options.settings)
+  const width = frame.flip & 4 ? plan.height : plan.width,
+    height = frame.flip & 4 ? plan.width : plan.height
+  const byteLength = frameByteLength(width, height) * 4
+  if (byteLength > 512 * 1024 ** 2 || frame.data.byteLength + width * 64 * 16 > 384 * 1024 ** 2)
+    throw new Error('This photo exceeds the HDR processing memory limit.')
+  const asset: HdrWorkingAsset = {
+    kind: 'hdr-working-v1',
+    width,
+    height,
+    byteLength,
+    sha256: '',
+    strips: [],
+    whiteBalance: hdrWhiteBalance(options.metadata.whiteBalance),
+    source: {
+      version: HDR_SOURCE_VERSION,
+      processing: 'hdr-v1',
+      colorSpace: 'rec2020',
+      whitePoint: 'D65',
+      transfer: 'linear',
+      alpha: 'straight',
+      normalization: normal,
+      decoder: `${decoder.id}-${decoder.version}`,
+      cameraProfile: `${profile.id}-${profile.version}`,
+      orientation: 'applied-once',
+    },
+  }
+  const file = await open(join(output, 'linear.f32'), 'wx')
+  const digest = createHash('sha256')
+  const cx = (frame.width - 1) / 2,
+    cy = (frame.height - 1) / 2,
+    radius = Math.hypot(cx, cy)
+  const geometric = plan.applied.distortion || plan.applied.chromaticAberration
+  const gain = (x: number, y: number) => radial(plan.lut, Math.hypot(x - cx, y - cy) / radius, 3)
+  const camera: RGB = [0, 0, 0]
+  try {
+    for (let top = 0; top < height; top += 64) {
+      const count = Math.min(64, height - top)
+      const data = gpuPrepared
+        ? frame.data.subarray(top * width * 4, (top + count) * width * 4)
+        : new Float32Array(width * count * 4)
+      for (let y = top; !gpuPrepared && y < top + count; y++)
+        for (let x = 0; x < width; x++) {
+          let sx = frame.flip & 4 ? y : x,
+            sy = frame.flip & 4 ? x : y
+          if (frame.flip & 1) sx = plan.width - 1 - sx
+          if (frame.flip & 2) sy = plan.height - 1 - sy
+          const qx = sx + plan.left - cx,
+            qy = sy + plan.top - cy,
+            r = Math.hypot(qx, qy) / radius
+          for (let c = 0; c < 3; c++) {
+            if (!geometric) {
+              camera[c] =
+                frame.data[((sy + plan.top) * frame.width + sx + plan.left) * 4 + c] *
+                gain(sx + plan.left, sy + plan.top)
+              continue
+            }
+            const scale = radial(plan.lut, r, c),
+              px = cx + qx * scale,
+              py = cy + qy * scale
+            const ix = Math.floor(px),
+              iy = Math.floor(py)
+            let value = 0
+            for (let dy = -1; dy <= 2; dy++)
+              for (let dx = -1; dx <= 2; dx++) {
+                const tx = Math.max(0, Math.min(frame.width - 1, ix + dx)),
+                  ty = Math.max(0, Math.min(frame.height - 1, iy + dy))
+                value +=
+                  frame.data[(ty * frame.width + tx) * 4 + c] *
+                  gain(tx, ty) *
+                  cubic(px - ix - dx) *
+                  cubic(py - iy - dy)
+              }
+            camera[c] = value
+          }
+          const rgb = [0, 1, 2].map(
+            (c) =>
+              ((frame.matrix[c * 4] * camera[0] +
+                frame.matrix[c * 4 + 1] * camera[1] +
+                frame.matrix[c * 4 + 2] * camera[2]) *
+                normal.restoreGain) /
+              normal.referenceWhite,
+          )
+          const converted = matrixRgb(SRGB_TO_2020, rgb)
+          if (!converted.every(Number.isFinite)) throw new Error('Invalid HDR conversion.')
+          data.set([...converted, 1], ((y - top) * width + x) * 4)
+        }
+      const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      await file.writeFile(bytes)
+      digest.update(bytes)
+      asset.strips.push({ byteLength: bytes.byteLength, sha256: sha(bytes) })
+    }
+    asset.sha256 = digest.digest('hex')
+  } finally {
+    await file.close()
+  }
+  return { asset, backend: actualBackend, fallback, applied: plan.applied }
+}
+
+export async function renderHdr(
+  path: string,
+  output: string,
+  options: ProcessingOptions,
+  gpu: Pick<RawGpuRenderer, 'render' | 'releaseFrame'>,
+  backend: string,
+): Promise<FullPreviewResult> {
+  const start = performance.now()
+  const cached = options.workingAsset?.hdr
+  const prepared = cached ? undefined : await prepare(path, output, options, gpu, backend)
+  const asset = prepared?.asset ?? cached!
+  const sourcePath = prepared ? join(output, 'linear.f32') : options.workingAsset!.path
+  const adjustments = options.adjustments ?? neutralAdjustments
+  if (options.workingOnly)
+    return {
+      width: asset.width,
+      height: asset.height,
+      format: 'hdr-working',
+      byteLength: 0,
+      sha256: asset.sha256,
+      placeholderBytes: 0,
+      linear: {
+        byteLength: asset.byteLength,
+        sha256: asset.sha256,
+        transform: srgbTransform,
+        hdr: asset,
+      },
+      adjustments,
+      settingsRevision: options.revision,
+      appliedCorrections: prepared?.applied,
+      renderId: `${HDR_SOURCE_VERSION}-${asset.sha256}`,
+      diagnostics: {
+        backend: prepared?.backend ?? 'cpu',
+        fallback: prepared?.fallback,
+        timings: { totalMs: performance.now() - start },
+      },
+    }
+  const wb = hdrAdjustmentMatrix(adjustments, asset.whiteBalance) ?? undefined
+  const file = await open(join(output, 'full.rgba'), 'wx')
+  const digest = createHash('sha256')
+  const ratio = Math.min(1, 96 / Math.max(asset.width, asset.height))
+  const thumbWidth = Math.max(1, Math.round(asset.width * ratio)),
+    thumbHeight = Math.max(1, Math.round(asset.height * ratio))
+  const thumb = Buffer.alloc(thumbWidth * thumbHeight * 4)
+  let top = 0
+  try {
+    for await (const strip of readHdrStrips(sourcePath, asset)) {
+      const data = Buffer.alloc(strip.length)
+      for (let i = 0; i < strip.length; i += 4) {
+        const rgb = outputHdr(
+          adjustHdr([strip[i], strip[i + 1], strip[i + 2]], adjustments, wb),
+          SDR_TARGET,
+        ).rgb
+        for (let c = 0; c < 3; c++) data[i + c] = Math.round(encodeHdr(rgb[c]) * 255)
+        data[i + 3] = Math.round(strip[i + 3] * 255)
+      }
+      digest.update(data)
+      await file.writeFile(data)
+      for (let row = 0; row < strip.length / (asset.width * 4); row++) {
+        const py = Math.floor(((top + row) * thumbHeight) / asset.height)
+        if (top + row !== Math.floor(((py + 0.5) * asset.height) / thumbHeight)) continue
+        for (let x = 0; x < thumbWidth; x++) {
+          const from = (row * asset.width + Math.floor(((x + 0.5) * asset.width) / thumbWidth)) * 4
+          data.copy(thumb, (py * thumbWidth + x) * 4, from, from + 4)
+        }
+      }
+      top += strip.length / (asset.width * 4)
+    }
+  } finally {
+    await file.close()
+  }
+  const placeholder = await sharp(thumb, {
+    raw: { width: thumbWidth, height: thumbHeight, channels: 4 },
+  })
+    .withIccProfile('srgb')
+    .png()
+    .toBuffer()
+  await writeFile(join(output, 'placeholder.png'), placeholder)
+  return {
+    width: asset.width,
+    height: asset.height,
+    format: 'rgba8-srgb',
+    byteLength: asset.width * asset.height * 4,
+    sha256: digest.digest('hex'),
+    placeholderBytes: placeholder.byteLength,
+    linear: prepared
+      ? { byteLength: asset.byteLength, sha256: asset.sha256, transform: srgbTransform, hdr: asset }
+      : undefined,
+    adjustments,
+    settingsRevision: options.revision,
+    appliedCorrections: prepared?.applied,
+    renderId: `${HDR_SOURCE_VERSION}-${HDR_ADJUSTMENT_VERSION}-${HDR_OUTPUT_VERSION}-${JSON.stringify(adjustments)}`,
+    diagnostics: {
+      backend: prepared?.backend ?? 'cpu',
+      fallback: prepared?.fallback,
+      timings: { totalMs: performance.now() - start },
+    },
+  }
+}

@@ -1,7 +1,8 @@
 import type { WhiteBalanceProfile } from './white-balance'
 import type { AdjustmentParameters } from './adjustments'
 import type { DisplayTransform } from './adjustments'
-export const PROCESSING_METADATA_VERSION = 2
+import type { ProcessingIdentity, HdrWorkingAsset } from './hdr'
+export const PROCESSING_METADATA_VERSION = 3
 export const correctionKinds = ['distortion', 'vignetting', 'chromaticAberration'] as const
 export type CorrectionKind = (typeof correctionKinds)[number]
 export type LensSettings = Record<CorrectionKind, boolean>
@@ -32,6 +33,7 @@ export interface LensProfile {
   unavailable: Partial<Record<CorrectionKind, string>>
 }
 export interface ProcessingMetadata {
+  hdrEligible?: boolean
   whiteBalance?: WhiteBalanceProfile
   version: number
   make?: string
@@ -49,6 +51,7 @@ export interface LensState {
   profile: LensProfile
 }
 export interface ProcessingOptions {
+  processing?: ProcessingIdentity
   /** Main-process owned cache asset, never accepted from the renderer. */
   workingAsset?: {
     path: string
@@ -57,9 +60,11 @@ export interface ProcessingOptions {
     byteLength: number
     sha256: string
     transform: DisplayTransform
+    hdr?: HdrWorkingAsset
   }
   adjustments?: AdjustmentParameters
   prepareLinear?: boolean
+  workingOnly?: boolean
   metadata: ProcessingMetadata
   settings: LensSettings
   revision: number

@@ -10,18 +10,34 @@ export default defineConfig(({ command }) => {
       build: {
         rollupOptions: {
           external: ['webgpu'],
-          input: { index: 'src/main/index.ts', 'preview-worker': 'src/main/preview-worker.ts' },
+          input: {
+            index: 'src/main/index.ts',
+            'preview-worker': 'src/main/preview-worker.ts',
+            'hdr-diagnostic': 'src/main/hdr-diagnostic.ts',
+          },
         },
       },
     },
     preload: {
       build: {
         rollupOptions: {
-          output: { format: 'cjs', entryFileNames: 'index.cjs' },
+          input: {
+            index: 'src/preload/index.ts',
+            'hdr-diagnostic': 'src/preload/hdr-diagnostic.ts',
+          },
+          output: { format: 'cjs', entryFileNames: '[name].cjs' },
         },
       },
     },
     renderer: {
+      build: {
+        rollupOptions: {
+          input: {
+            index: 'src/renderer/index.html',
+            'hdr-diagnostic': 'src/renderer/hdr-diagnostic.html',
+          },
+        },
+      },
       html: { cspNonce: nonce },
       plugins: [
         react(),

@@ -1,4 +1,5 @@
 import { imageStatistics } from '../shared/statistics'
+import { renderHdr } from './processing/hdr-processing'
 import { resolveWhiteBalance } from './processing/white-balance'
 import {
   renderAdjustments,
@@ -57,6 +58,7 @@ export class PreviewEngine {
         const session = await decoder.open(path)
         try {
           metadata.whiteBalance = resolveWhiteBalance(session.metadata)
+          metadata.hdrEligible = session.metadata.hdrEligible
         } finally {
           session.close()
         }
@@ -85,7 +87,15 @@ export class PreviewEngine {
       },
       rawDecoder(path) ? undefined : [],
     )
-    if (rawDecoder(path)) processing.version = 1
+    if (rawDecoder(path)) {
+      const session = await rawDecoder(path)!.open(path)
+      try {
+        processing.whiteBalance = resolveWhiteBalance(session.metadata)
+        processing.hdrEligible = session.metadata.hdrEligible
+      } finally {
+        session.close()
+      }
+    }
     let input = sharp(path)
     let source: PreviewResult['source'] = 'image'
     let rawDimensions: { width: number; height: number } | undefined
@@ -159,6 +169,10 @@ export class PreviewEngine {
     onStage?: (stage: PreviewStage) => void,
     options?: ProcessingOptions,
   ): Promise<FullPreviewResult> {
+    if (options?.processing === 'hdr-v1') {
+      this.releaseFrame()
+      return renderHdr(path, output, options, this.gpu, this.backend)
+    }
     const started = performance.now()
     const timings: Record<string, number> = {}
     const workingKey = JSON.stringify([

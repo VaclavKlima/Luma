@@ -10,6 +10,14 @@ interface Suite {
   scopes: Scope[]
 }
 const definitions: Suite[] = [
+  { file: 'hdr', group: 'node', scopes: ['preview', 'adjustments'] },
+  { file: 'hdr-assets', group: 'service', scopes: ['preview', 'adjustments'] },
+  { file: 'hdr-migration', group: 'service', scopes: ['library', 'adjustments'] },
+  { file: 'hdr-math-gpu', group: 'raw-gpu', scopes: ['preview', 'adjustments'] },
+  { file: 'hdr-raw', group: 'raw-gpu', scopes: ['preview', 'adjustments'] },
+  { file: 'hdr-editor-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'adjustments', 'mcp'] },
+  { file: 'hdr-display', group: 'node', scopes: ['preview'] },
+  { file: 'hdr-diagnostic-ui', group: 'electron', scopes: ['ui', 'preview'] },
   ...['white-balance', 'statistics', 'contrast', 'highlights', 'tonal-adjustments', 'edits'].map(
     (file) => ({
       file,
@@ -86,7 +94,7 @@ const definitions: Suite[] = [
     group: 'raw-gpu' as const,
     scopes: ['library'] as Scope[],
   })),
-  ...['preview-benchmark', 'adjustment-benchmark'].map((file) => ({
+  ...['preview-benchmark', 'adjustment-benchmark', 'hdr-benchmark'].map((file) => ({
     file,
     group: 'benchmark' as const,
     scopes: [] as Scope[],

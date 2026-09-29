@@ -1,3 +1,5 @@
+import type { DisplayState } from './display-state'
+import type { PreviewPreference } from '../shared/hdr-display'
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdir, writeFile, rename, rm, chmod } from 'node:fs/promises'
@@ -6,7 +8,11 @@ import type { PhotoLibrary } from './library'
 import type { EditPatch } from '../shared/edits'
 
 /** Private, authenticated transport for enumerated operations. The application owns SQLite. */
-export async function startEditorEndpoint(profile: string, library: PhotoLibrary) {
+export async function startEditorEndpoint(
+  profile: string,
+  library: PhotoLibrary,
+  display?: DisplayState,
+) {
   const token = randomBytes(32).toString('hex')
   let closing = false
   const server = createServer(async (request, response) => {
@@ -33,7 +39,21 @@ export async function startEditorEndpoint(profile: string, library: PhotoLibrary
         body += chunk.toString()
         if (body.length > 16384) throw new Error('Editor request is too large.')
       }
-      const { operation, photoId, patch, expectedRevision, offset } = JSON.parse(body) as {
+      const {
+        operation,
+        photoId,
+        patch,
+        expectedRevision,
+        offset,
+        preference,
+        domain,
+        target,
+        targetGeneration,
+      } = JSON.parse(body) as {
+        domain?: import('../shared/hdr-statistics').HdrAnalysisDomain
+        target?: 'sdr' | 'current'
+        targetGeneration?: number
+        preference?: PreviewPreference
         operation: string
         photoId: string
         patch: EditPatch
@@ -42,11 +62,32 @@ export async function startEditorEndpoint(profile: string, library: PhotoLibrary
       }
       let result: unknown
       switch (operation) {
+        case 'luma_get_preview_diagnostics':
+          result = {
+            ...library.fullPreviews.getDiagnostics(),
+            presentation: display?.get().presentation,
+          }
+          break
+        case 'luma_get_display_state':
+          if (!display) throw new Error('Display state unavailable.')
+          result = display.get()
+          break
+        case 'luma_set_preview_preference':
+          if (!display || !preference) throw new Error('Display preference unavailable.')
+          result = await display.set(preference)
+          break
+        case 'luma_upgrade_photo_processing':
+          result = await library.upgradePhotoProcessing(photoId, expectedRevision)
+          break
         case 'luma_list_photos':
           result = library.list(offset)
           break
         case 'luma_get_photo_statistics':
-          result = await library.getPhotoStatistics(photoId, expectedRevision)
+          result = await library.getPhotoStatistics(
+            photoId,
+            expectedRevision,
+            domain === undefined ? undefined : { domain, target, targetGeneration },
+          )
           break
         case 'luma_get_edits':
           result = await library.getEdits(photoId)

@@ -22,10 +22,42 @@ const schema = (properties, required = Object.keys(properties)) => ({
 })
 const tools = [
   {
+    name: 'luma_get_preview_diagnostics',
+    description:
+      'Read preview preparation, cache, loading and presentation diagnostics for the active photo.',
+    inputSchema: schema({}),
+  },
+  {
+    name: 'luma_get_display_state',
+    description:
+      'Read the requested preference, detected monitor/adapter capabilities, target, actual frame presentation and unverified physical-output status.',
+    inputSchema: schema({}),
+  },
+  {
+    name: 'luma_set_preview_preference',
+    description: 'Set workspace Auto, HDR, or SDR preference without changing photo edits.',
+    inputSchema: schema({ preference: { enum: ['auto', 'hdr', 'sdr'] } }),
+  },
+  {
+    name: 'luma_upgrade_photo_processing',
+    description:
+      'Upgrade an eligible Sony RAW to experimental HDR processing as one undoable edit.',
+    inputSchema: schema({ photoId, expectedRevision }),
+  },
+  {
     name: 'luma_get_photo_statistics',
     description:
-      'Exact committed SDR sRGB histogram and clipping counts at the expected revision; endpoints do not establish RAW data loss.',
-    inputSchema: schema({ photoId, expectedRevision }),
+      'Exact committed statistics. Omit domain for compatible SDR sRGB bins; HDR domains use stops relative to white. Current output requires targetGeneration from display state.',
+    inputSchema: schema(
+      {
+        photoId,
+        expectedRevision,
+        domain: { enum: ['working-hdr', 'output'] },
+        target: { enum: ['sdr', 'current'] },
+        targetGeneration: { type: 'integer', minimum: 0 },
+      },
+      ['photoId', 'expectedRevision'],
+    ),
   },
   {
     name: 'luma_list_photos',

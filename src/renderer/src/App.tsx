@@ -1,3 +1,6 @@
+import { DisplayDetails } from './components/DisplayDetails'
+import { useDisplayState } from './hooks/useDisplayState'
+import type { PreviewPreference } from '../../shared/hdr-display'
 import { usePreviewTools } from './hooks/usePreviewTools'
 import { useEdits } from './hooks/useEdits'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -55,6 +58,7 @@ export function App() {
     getSelection,
   } = library
   const edits = useEdits(photo?.id)
+  const displayTarget = useDisplayState()
   const previewTools = usePreviewTools(photo?.id)
   const [interactivePhoto, setInteractivePhoto] = useState<string | null>(null)
   const [deleteTargets, setDeleteTargets] = useState<PhotoReference[] | null>(null)
@@ -240,7 +244,38 @@ export function App() {
             <div className={styles.filename}>
               <FileImage size={13} />
               <span data-testid="preview-filename">{photo?.filename ?? 'No photo selected'}</span>
-              <span className={styles.sdrBadge}>SDR</span>
+              <select
+                aria-label="Preview display mode"
+                value={displayTarget.requested}
+                onChange={(event) => {
+                  void window.luma
+                    .setPreviewPreference(event.target.value as PreviewPreference)
+                    .catch((error) => setError(String(error)))
+                }}
+              >
+                <option value="auto">Auto</option>
+                <option value="hdr">HDR</option>
+                <option value="sdr">SDR</option>
+              </select>
+              <DisplayDetails
+                target={displayTarget}
+                photoId={photo?.id}
+                hdr={edits.state?.settings.processing === 'hdr-v1'}
+              />
+              {edits.state?.settings.processing === 'legacy-sdr-v1' && edits.state.hdrEligible && (
+                <button
+                  disabled={edits.saving}
+                  onClick={() => {
+                    void (async () => {
+                      await edits.flush()
+                      const current = await window.luma.getEdits(photo!.id)
+                      await window.luma.upgradePhotoProcessing(photo!.id, current.revision)
+                    })().catch((error) => setError(String(error)))
+                  }}
+                >
+                  Upgrade to HDR
+                </button>
+              )}
             </div>
             <div className={styles.previewActions}>
               <button
@@ -302,6 +337,7 @@ export function App() {
             </p>
           )}
           <PhotoPreview
+            displayTarget={displayTarget}
             key={photo?.id ?? 'empty'}
             photo={photo}
             adjustments={edits.adjustments}

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { FullPreview } from '../../../shared/contracts'
+import type { FullPreview, DisplayPreview } from '../../../shared/contracts'
 import { cachedFrame, loadFrame, type FrameLease } from '../preview/frame-cache'
 
 interface State {
-  preview: FullPreview | null
+  preview: DisplayPreview | null
   pixels: ImageBitmap | null
   placeholder: FullPreview | null
   error: string | null
@@ -44,15 +44,25 @@ export function useFullPreview(photoId: string | undefined) {
     void (async () => {
       const started = performance.now()
       try {
-        let preview = !regenerate
-          ? await window.luma.requestCachedFullPreview(photoId, requestId)
-          : null
+        let preview: DisplayPreview | null = await window.luma.requestHdrPreview(
+          photoId,
+          requestId,
+          regenerate,
+        )
+        if (!preview && !regenerate)
+          preview = await window.luma.requestCachedFullPreview(photoId, requestId)
         if (cancelled) return
         if (!preview) preview = await window.luma.requestFullPreview(photoId, requestId, regenerate)
         if (cancelled) return
         if ((preview.settingsRevision ?? 0) < latestRevision.current) return
         if (preview.photoId !== photoId || preview.requestId !== requestId)
           throw new Error('The preview response does not match this photo.')
+        if (preview.format === 'hdr-working') {
+          displayedLease.current?.release()
+          displayedLease.current = null
+          setState({ preview, pixels: null, placeholder: null, error: null })
+          return
+        }
         frame = cachedFrame(preview) ?? undefined
         if (!frame) {
           // The placeholder and frame share the exact rendering revision.

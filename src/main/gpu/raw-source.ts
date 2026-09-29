@@ -5,6 +5,7 @@ import { cameraProfile } from '../processing/cameras'
 import type { LibRaw } from '@colorhythm/libraw-wasm'
 
 export interface RawSource {
+  normalization?: import('../../shared/hdr').HdrNormalization
   whiteBalance?: WhiteBalanceProfile
   pixels: Uint16Array<ArrayBuffer>
   width: number
@@ -20,7 +21,7 @@ export interface RawSource {
 }
 
 /** Only enable camera models whose Bayer output has been compared against LibRaw. */
-export function readGpuSource(decoder: LibRaw): RawSource | null {
+export function readGpuSource(decoder: LibRaw, hdr = false): RawSource | null {
   const camera = decoder.getIParams()
   const profile = cameraProfile(camera.normalized_make, camera.normalized_model)
   if (
@@ -60,14 +61,34 @@ export function readGpuSource(decoder: LibRaw): RawSource | null {
       observed = Math.max(observed, pixels[(y + top) * rawWidth + left + x] - black[c])
     }
   const nominal = decoder.getColorMaximum() - decoder.getBlack()
-  const maximum = observed > nominal * 0.75 && observed < nominal ? observed : nominal
+  const maximum = !hdr && observed > nominal * 0.75 && observed < nominal ? observed : nominal
   const saturation = maximum
   if (saturation <= 0) return null
-  const minimumWb = Math.min(...wb)
+  const minimumWb = hdr ? Math.max(...wb) : Math.min(...wb)
   const scale = wb.map((v) =>
     Math.fround(Math.fround(Math.fround(v / minimumWb) * 65535) / saturation),
   )
+  const thresholds = [0, 1, 2, 3].map((c) => decoder.getLinearMax(c))
+  const known = thresholds.every((v, c) => Number.isFinite(v) && v > black[c])
+  let saturatedSites = 0
+  if (hdr && known)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        if (pixels[(y + top) * rawWidth + left + x] >= thresholds[cfa[(y % 2) * 2 + (x % 2)]])
+          saturatedSites++
   return {
+    normalization: hdr
+      ? {
+          black,
+          maximum,
+          gains: wb,
+          restoreGain: Math.max(...wb) / Math.min(...wb),
+          referenceWhite: 1,
+          sourceSaturation: known
+            ? { thresholds, saturatedSites, totalSites: width * height }
+            : null,
+        }
+      : undefined,
     pixels,
     width,
     height,

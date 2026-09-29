@@ -3,6 +3,7 @@ import { LibRaw } from '@colorhythm/libraw-wasm'
 import type { RawDecoder, LinearFrame } from '../contracts'
 import { readGpuSource } from '../../gpu/raw-source'
 import { rawDecoderDefinitions } from '../formats'
+import { cameraProfile } from '../cameras'
 
 export const librawDecoder: RawDecoder = {
   ...rawDecoderDefinitions[0],
@@ -35,6 +36,13 @@ export const librawDecoder: RawDecoder = {
       const camera = decoder.getIParams()
       return {
         metadata: {
+          hdrEligible:
+            !!cameraProfile(camera.normalized_make, camera.normalized_model)?.gpu &&
+            decoder.unpackFunctionName() === 'sony_arw2_load_raw()' &&
+            decoder.getColors() === 3 &&
+            decoder.getPixelAspect() === 1 &&
+            dimensions.width * 2 > dimensions.height * 2.9 &&
+            dimensions.width * 2 < dimensions.height * 3.1,
           color: {
             asShotGains: [0, 1, 2].map((c) => decoder.getCamMul(c)),
             xyzToCamera: [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) => decoder.getCamXyz(r, c))),
@@ -53,7 +61,10 @@ export const librawDecoder: RawDecoder = {
         },
         dimensions,
         unpack,
-        gpuSource: () => readGpuSource(decoder),
+        gpuSource: (hdr = false) => {
+          unpack()
+          return readGpuSource(decoder, hdr)
+        },
         display(halfSize = false) {
           // Quick fallback previews retain LibRaw's existing default curve.
           if (!halfSize) {
@@ -68,7 +79,7 @@ export const librawDecoder: RawDecoder = {
             throw new Error('The RAW decoder returned an unsupported pixel format.')
           return { data: decoded.data, width: decoded.width, height: decoded.height }
         },
-        linear(): LinearFrame {
+        linear(hdr = false): LinearFrame {
           const { width, height, flip } = dimensions
           if (width * height * 16 > 384 * 1024 ** 2)
             throw new Error('This photo exceeds the linear processing memory limit.')
@@ -79,6 +90,14 @@ export const librawDecoder: RawDecoder = {
           decoder.setGamma(1, 1)
           decoder.setNoAutoBright(1)
           unpack()
+          const normalization = hdr ? readGpuSource(decoder, true)?.normalization : undefined
+          if (hdr && !normalization)
+            throw new Error('This RAW mode is not eligible for HDR processing.')
+          if (normalization) {
+            decoder.setHighlight(1)
+            decoder.setAdjustMaximumThr(0)
+            normalization.gains.forEach((gain, c) => decoder.setUserMul(c, gain))
+          }
           decoder.dcrawProcess()
           const decoded = decoder.dcrawMakeMemImage()
           if (
@@ -107,7 +126,7 @@ export const librawDecoder: RawDecoder = {
               for (let c = 0; c < 3; c++) data[to + c] = pixels[from + c] / 65535
               data[to + 3] = 1
             }
-          return { data, width, height, flip, matrix }
+          return { data, width, height, flip, matrix, normalization }
         },
         close: () => decoder.dispose(),
       }
