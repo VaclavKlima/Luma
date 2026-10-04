@@ -1,6 +1,7 @@
 import { writeFile } from 'node:fs/promises'
 import { expect, test } from './electron.fixture'
 import { importPhotos } from './import.helpers'
+import { recordBenchmark } from './benchmark.helpers'
 
 for (const adjustment of [
   'exposure',
@@ -14,7 +15,10 @@ for (const adjustment of [
   test(`benchmarks warmed RAW ${adjustment} gestures through the actual editor`, async ({
     luma,
   }, info) => {
-    test.skip(!process.env.LUMA_PREVIEW_BENCHMARK, 'Run npm run benchmark:preview.')
+    test.skip(
+      process.env.LUMA_PREVIEW_BENCHMARK !== '1',
+      'Run npm run benchmark:adjustments -- <name> or benchmark:all.',
+    )
     test.setTimeout(90000)
     await importPhotos(luma.app, luma.page, ['tests/fixtures/sony-zv1.ARW'])
     await expect(luma.page.getByTestId('main-preview')).toHaveAttribute('data-editing', 'ready', {
@@ -73,6 +77,18 @@ for (const adjustment of [
       }
     }, adjustment)
     await writeFile(info.outputPath(`${adjustment}-latency.json`), JSON.stringify(result, null, 2))
+    await recordBenchmark(info, {
+      family: 'adjustments',
+      measurements: {
+        adjustment,
+        p95Ms: result.p95,
+        backend: result.backend,
+        samples: result.latencies.length,
+        warmupGestures: 5,
+      },
+      gates: [{ metric: 'p95Ms', operator: '<=', limit: 33 }],
+      evidence: [info.outputPath(`${adjustment}-latency.json`)],
+    })
     console.log({ adjustment, p95: result.p95, backend: result.backend })
     expect(result.backend).toBe('webgl2')
     expect(result.p95).toBeLessThanOrEqual(33)

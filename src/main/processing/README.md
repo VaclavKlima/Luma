@@ -196,7 +196,7 @@ The preview key includes the original content hash, decoder definitions, camera 
 
 Use licensed, attributed fixtures and record their provenance in [tests/fixtures/README.md](../../../tests/fixtures/README.md). Synthetic test data belongs in tests, never in production profiles. The [second camera/provider test](../../../tests/lens-correction.spec.ts) demonstrates extension through injected registries without viewer changes.
 
-For performance work, save a baseline from `npm run benchmark:preview`. Its unique artifact directory survives subsequent verification runs. For correctness changes, use focused verification; measure benchmarks at milestones or during performance work. After implementation:
+For performance work, save a baseline from `npm run benchmark:preview`. Its unique artifact directory survives subsequent verification runs. For correctness changes, select explicit suite targets. Comprehensive checks require a user-requested or previously agreed checkpoint; feature completion alone never triggers one. After implementation:
 
 1. Test provider selection, unrelated files, missing/malformed tables, independent availability, unequal lengths, calibration boundaries, and stable identities.
 2. Compare grids, synthetic brightness falloff, and deliberately displaced channels with the CPU reference. Cover sensor margins, portrait orientation, all supported flips, native crop dimensions, and CPU/GPU agreement.
@@ -206,20 +206,17 @@ For performance work, save a baseline from `npm run benchmark:preview`. Its uniq
 Useful focused checks, run from the repository root:
 
 ```sh
-npm run build
-npm run verify -- preview adjustments library
+npm run verify -- --target lens-correction --target lens-correction-raw
+# Add affected cache/library/UI targets explicitly; use --plan to inspect selection.
 ```
 
-Run the complete required checks before shipping a processing change:
+At an agreed comprehensive checkpoint:
 
 ```sh
-npm run verify -- preview adjustments
-# At milestones or during performance work:
-LUMA_PREVIEW_BASELINE=/absolute/path/baseline.json npm run benchmark:preview
-npm run mcp:test
+LUMA_PREVIEW_BASELINE=/absolute/path/baseline.json npm run check:all
 ```
 
-The benchmark requires the uncorrected CPU and GPU paths to stay within 15% of the saved baseline and corrected GPU rendering to remain faster than corrected CPU rendering. It reports correction overhead separately and measures actual Electron presentation. Run it without competing GPU tests.
+The preview benchmark requires the uncorrected CPU and GPU paths to stay within 15% of the saved baseline and corrected GPU rendering to remain faster than corrected CPU rendering. It reports correction overhead separately and measures actual Electron presentation. `benchmark:preview` covers preview measurements only; `benchmark:all` retains all benchmark families. Missing baselines or required hardware produce incomplete verification. Run benchmarks without competing GPU tests.
 
 `LUMA_RAW_TEST_FILES` accepts a JSON array of absolute paths for additional GPU regression samples; `LUMA_RAW_BENCHMARK_FILE` selects one benchmark RAW. Keep private samples outside committed fixtures. Report hardware skips and unverified platforms explicitly.
 

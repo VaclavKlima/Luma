@@ -55,11 +55,13 @@ export function readGpuSource(decoder: LibRaw, hdr = false): RawSource | null {
   // LibRaw's default maximum adjustment uses the observed, black-subtracted maximum
   // when it is close enough to the nominal sensor saturation level.
   let observed = 0
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) {
-      const c = cfa[(y % 2) * 2 + (x % 2)]
-      observed = Math.max(observed, pixels[(y + top) * rawWidth + left + x] - black[c])
-    }
+  // HDR and merge normalization always use sensor white, independently of scene maxima.
+  if (!hdr)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const c = cfa[(y % 2) * 2 + (x % 2)]
+        observed = Math.max(observed, pixels[(y + top) * rawWidth + left + x] - black[c])
+      }
   const nominal = decoder.getColorMaximum() - decoder.getBlack()
   const maximum = !hdr && observed > nominal * 0.75 && observed < nominal ? observed : nominal
   const saturation = maximum

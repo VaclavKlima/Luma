@@ -2,7 +2,7 @@
 
 ## Status
 
-**Planned.** Exposure merging is part of the complete HDR destination and is not implemented. [Shared requirements](README.md#shared-implementation-requirements) apply.
+**Experimental bounded implementation.** The [Sony HDR/noise merge milestone](../merge-processing.md) implements review, processing and permanent derived masters for verified Sony inputs. Supplied handheld portraits and local 2/3/5/9-frame noise-stack timing gates pass; the broader workflow and remaining real-sequence gates below are incomplete. [Shared requirements](README.md#shared-implementation-requirements) apply.
 
 ## Goal
 

@@ -1,6 +1,8 @@
 export const scopes = ['ui', 'adjustments', 'preview', 'library', 'mcp'] as const
 export type Scope = (typeof scopes)[number]
 export type Group = 'node' | 'service' | 'electron' | 'raw-gpu' | 'benchmark'
+export type Phase = 'functional' | 'benchmark'
+export type BenchmarkFamily = 'preview' | 'adjustments' | 'hdr' | 'merge'
 
 // Every spec belongs to exactly one execution group. Scope membership is explicit;
 // selecting several scopes runs their union, independent of the working tree.
@@ -8,8 +10,18 @@ interface Suite {
   file: string
   group: Group
   scopes: Scope[]
+  exclusive?: boolean
+  family?: BenchmarkFamily
 }
 const definitions: Suite[] = [
+  { file: 'merge-raw-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'library', 'mcp'] },
+  { file: 'merge-ui', group: 'electron', scopes: ['ui', 'library', 'mcp'] },
+  { file: 'merge-library', group: 'service', scopes: ['library', 'adjustments', 'preview'] },
+  { file: 'merge-raw', group: 'raw-gpu', scopes: ['preview', 'library'] },
+  { file: 'merge-gpu', group: 'raw-gpu', scopes: ['preview', 'library'] },
+  { file: 'merge-photographs', group: 'service', scopes: ['preview', 'library'] },
+  { file: 'merge', group: 'node', scopes: ['preview', 'library'] },
+  { file: 'merge-engine', group: 'service', scopes: ['preview', 'library'] },
   { file: 'hdr', group: 'node', scopes: ['preview', 'adjustments'] },
   { file: 'hdr-assets', group: 'service', scopes: ['preview', 'adjustments'] },
   { file: 'hdr-migration', group: 'service', scopes: ['library', 'adjustments'] },
@@ -58,7 +70,8 @@ const definitions: Suite[] = [
     group: 'electron' as const,
     scopes: ['ui', 'adjustments'] as Scope[],
   })),
-  { file: 'adjustment-history-ui', group: 'raw-gpu', scopes: ['adjustments'] },
+  { file: 'adjustment-history-ui', group: 'electron', scopes: ['adjustments'] },
+  { file: 'adjustment-history-raw-ui', group: 'raw-gpu', scopes: ['adjustments'] },
   { file: 'adjustment-renderer-ui', group: 'electron', scopes: ['adjustments', 'preview'] },
   ...['preview', 'preview-pixels-ui'].map((file) => ({
     file,
@@ -72,7 +85,8 @@ const definitions: Suite[] = [
     group: 'electron' as const,
     scopes: ['library'] as Scope[],
   })),
-  { file: 'editor-mcp', group: 'raw-gpu', scopes: ['mcp', 'adjustments'] },
+  { file: 'editor-mcp', group: 'electron', scopes: ['mcp', 'adjustments'] },
+  { file: 'editor-mcp-raw', group: 'raw-gpu', scopes: ['mcp', 'adjustments'] },
   ...[
     'adjustment-engine-raw',
     'adjustment-renderer-raw-ui',
@@ -94,37 +108,83 @@ const definitions: Suite[] = [
     group: 'raw-gpu' as const,
     scopes: ['library'] as Scope[],
   })),
-  ...['preview-benchmark', 'adjustment-benchmark', 'hdr-benchmark'].map((file) => ({
-    file,
+  ...(['preview', 'adjustments', 'hdr', 'merge'] as BenchmarkFamily[]).map((family) => ({
+    file: `${family === 'adjustments' ? 'adjustment' : family}-benchmark`,
     group: 'benchmark' as const,
     scopes: [] as Scope[],
+    family,
   })),
 ]
 export const suites = definitions.map((suite) => ({
   ...suite,
+  target: suite.file,
   file: `tests/${suite.file}.spec.ts`,
 }))
+export const isolatedMcp = {
+  target: 'mcp-import',
+  file: 'scripts/check-mcp.mjs',
+  group: 'mcp' as const,
+}
+export const registry = [...suites, isolatedMcp]
+export const targets = registry.map((suite) => suite.target)
+
+export function workersFor(group: Group, exclusive = false): number {
+  return !exclusive && ['node', 'service', 'electron'].includes(group) ? 2 : 1
+}
+
+export interface ExecutionGroup {
+  name: Group
+  stage: string
+  phase: Phase
+  directory: string
+  workers: number
+  targets: string[]
+  files: string[]
+}
 
 export interface VerificationPlan {
   label: string
+  targets: string[]
+  requestedTargets: string[]
   staticChecks: boolean
   build: boolean
   mcp: boolean
   benchmark: boolean
+  comprehensive: boolean
+  continueOnFailure: boolean
+  routine: boolean
   grep?: string
-  groups: { name: Group; files: string[] }[]
+  groups: ExecutionGroup[]
 }
 
 export function selectPlan(args: string[]): VerificationPlan {
   const requested = args.filter((arg) => arg !== '--plan')
   const mode = requested[0]
-  const benchmark = mode === '--benchmark' || mode === '--adjustment-benchmark'
-  const internal = ['--fast', '--full', '--functional', '--mcp', '--editor', '--benchmark']
+  const internal = ['--fast', '--full', '--all', '--functional', '--mcp', '--editor']
+  const families: Record<string, BenchmarkFamily[]> = {
+    '--benchmark': ['preview'],
+    '--hdr-benchmark': ['hdr'],
+    '--merge-benchmark': ['merge'],
+    '--benchmark-all': ['preview', 'adjustments', 'hdr', 'merge'],
+  }
   let selected: typeof suites
   let mcp = false
   let staticChecks = true
   let grep: string | undefined
-  if (mode === '--adjustment-benchmark') {
+  let requestedTargets: string[] = []
+  if (mode === '--target') {
+    for (let index = 0; index < requested.length; index += 2) {
+      const target = requested[index + 1]
+      if (requested[index] !== '--target' || !target || !targets.includes(target))
+        throw new Error(
+          `Unknown or missing target: ${target ?? '(missing)'}. Targets: ${targets.join(', ')}.`,
+        )
+      requestedTargets.push(target)
+    }
+    requestedTargets = [...new Set(requestedTargets)]
+    selected = suites.filter((s) => s.group === 'node' || requestedTargets.includes(s.target))
+    mcp = requestedTargets.includes(isolatedMcp.target)
+  } else if (mode === '--adjustment-benchmark') {
     if (
       requested.length !== 2 ||
       ![
@@ -143,45 +203,94 @@ export function selectPlan(args: string[]): VerificationPlan {
     selected = suites.filter((s) => s.file === 'tests/adjustment-benchmark.spec.ts')
     grep = `warmed RAW ${requested[1]} gestures`
     staticChecks = false
+  } else if (families[mode]) {
+    if (requested.length !== 1) throw new Error(`${mode} does not accept scopes or targets.`)
+    selected = suites.filter((s) => s.family && families[mode].includes(s.family))
+    staticChecks = false
   } else if (internal.includes(mode)) {
     if (requested.length !== 1) throw new Error(`${mode} does not accept scopes.`)
-    mcp = mode === '--full' || mode === '--mcp'
-    staticChecks = mode === '--fast' || mode === '--full'
+    mcp = mode === '--full' || mode === '--all' || mode === '--mcp'
+    staticChecks = mode === '--fast' || mode === '--full' || mode === '--all'
     selected = suites.filter((s) =>
       mode === '--fast'
         ? s.group === 'node'
         : mode === '--mcp'
           ? false
           : mode === '--editor'
-            ? s.file === 'tests/editor-mcp.spec.ts'
-            : mode === '--benchmark'
-              ? s.group === 'benchmark'
-              : s.group !== 'benchmark',
+            ? ['editor-mcp', 'editor-mcp-raw'].includes(s.target)
+            : mode === '--all' || s.group !== 'benchmark',
     )
   } else {
     if (!requested.length || requested.some((scope) => !scopes.includes(scope as Scope)))
-      throw new Error(`Choose scopes: ${scopes.join(', ')}. Use --plan to preview selection.`)
+      throw new Error(
+        `Choose scopes: ${scopes.join(', ')} or --target <id>. Use --plan to preview selection.`,
+      )
     selected = suites.filter(
       (s) => s.group === 'node' || s.scopes.some((scope) => requested.includes(scope)),
     )
     mcp = requested.includes('mcp')
   }
-  const groups = (['node', 'service', 'electron', 'raw-gpu', 'benchmark'] as Group[])
-    .map((name) => ({
+  const groups: ExecutionGroup[] = []
+  const add = (
+    name: Group,
+    members: typeof suites,
+    stage: string,
+    phase: Phase,
+    directory: string,
+    exclusive = false,
+  ) => {
+    if (!members.length) return
+    groups.push({
       name,
-      files: selected
-        .filter((s) => s.group === name)
-        .map((s) => s.file)
-        .sort(),
-    }))
-    .filter((group) => group.files.length)
+      stage,
+      phase,
+      directory,
+      workers: workersFor(name, exclusive),
+      targets: members.map((s) => s.target).sort(),
+      files: members.map((s) => s.file).sort(),
+    })
+  }
+  for (const name of ['node', 'service', 'electron', 'raw-gpu'] as Group[]) {
+    add(
+      name,
+      selected.filter((s) => s.group === name && !s.exclusive),
+      name,
+      'functional',
+      `functional/${name}`,
+    )
+    add(
+      name,
+      selected.filter((s) => s.group === name && s.exclusive),
+      `${name}-exclusive`,
+      'functional',
+      `functional/${name}-exclusive`,
+      true,
+    )
+  }
+  for (const family of ['preview', 'adjustments', 'hdr', 'merge'] as BenchmarkFamily[])
+    add(
+      'benchmark',
+      selected.filter((s) => s.family === family),
+      `benchmark-${family}`,
+      'benchmark',
+      `benchmarks/${family}`,
+    )
+  const benchmark = groups.some((group) => group.phase === 'benchmark')
   return {
     label: [...new Set(requested)].sort().join('+'),
+    targets: [
+      ...selected.map((suite) => suite.target).sort(),
+      ...(mcp ? [isolatedMcp.target] : []),
+    ],
+    requestedTargets,
     staticChecks,
     // Library service tests also exercise the bundled preview worker.
     build: mcp || groups.some((group) => group.name !== 'node'),
     mcp,
     benchmark,
+    comprehensive: mode === '--all',
+    continueOnFailure: ['--full', '--all', '--benchmark-all'].includes(mode),
+    routine: mode === '--fast' || mode === '--target',
     grep,
     groups,
   }

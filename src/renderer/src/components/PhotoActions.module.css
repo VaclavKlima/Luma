@@ -24,6 +24,15 @@
 .menu button:focus-visible {
   background: var(--accent-surface);
 }
+.menu p {
+  max-width: 240px;
+  padding: 0 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.menu button[aria-disabled='true'] {
+  opacity: 0.5;
+}
 .menu kbd {
   margin-left: auto;
   color: var(--muted);

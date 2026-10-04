@@ -1,18 +1,30 @@
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { randomBytes } from 'node:crypto'
+import { cp, mkdir } from 'node:fs/promises'
 
 export default defineConfig(({ command }) => {
   const nonce = command === 'serve' ? randomBytes(18).toString('base64') : undefined
 
   return {
     main: {
+      plugins: [
+        {
+          name: 'luma-opencv-runtime',
+          async closeBundle() {
+            await mkdir('out/main/opencv', { recursive: true })
+            await cp('vendor/opencv', 'out/main/opencv', { recursive: true })
+          },
+        },
+      ],
       build: {
         rollupOptions: {
           external: ['webgpu'],
           input: {
             index: 'src/main/index.ts',
             'preview-worker': 'src/main/preview-worker.ts',
+            'merge-worker': 'src/main/merge/worker.ts',
+            'alignment-worker': 'src/main/merge/alignment-worker.ts',
             'hdr-diagnostic': 'src/main/hdr-diagnostic.ts',
           },
         },

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { open, writeFile } from 'node:fs/promises'
+import { copyFile, open, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import { analyzeHdr, hdrStatistics } from '../../shared/hdr-statistics'
@@ -259,6 +259,12 @@ export async function renderHdr(
   const prepared = cached ? undefined : await prepare(path, output, options, gpu, backend)
   const asset = prepared?.asset ?? cached!
   const sourcePath = prepared ? join(output, 'linear.f32') : options.workingAsset!.path
+  const permanentCopy = !!(
+    cached &&
+    options.metadata.mergeMaster &&
+    (options.workingOnly || options.prepareLinear)
+  )
+  if (permanentCopy) await copyFile(sourcePath, join(output, 'linear.f32'))
   const adjustments = options.adjustments ?? neutralAdjustments
   if (options.workingOnly)
     return {
@@ -332,9 +338,15 @@ export async function renderHdr(
     byteLength: asset.width * asset.height * 4,
     sha256: digest.digest('hex'),
     placeholderBytes: placeholder.byteLength,
-    linear: prepared
-      ? { byteLength: asset.byteLength, sha256: asset.sha256, transform: srgbTransform, hdr: asset }
-      : undefined,
+    linear:
+      prepared || permanentCopy
+        ? {
+            byteLength: asset.byteLength,
+            sha256: asset.sha256,
+            transform: srgbTransform,
+            hdr: asset,
+          }
+        : undefined,
     adjustments,
     settingsRevision: options.revision,
     appliedCorrections: prepared?.applied,

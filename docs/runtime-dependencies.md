@@ -36,3 +36,7 @@ Retain each shipped package's complete license/notice files. The npm dependencie
 | Node.js             | MIT and bundled third-party notices in the runtime package's `LICENSE`                                                  |
 
 Test photographs are never part of the application bundle. Their provenance is in [fixture documentation](../tests/fixtures/README.md).
+
+## HDR merge alignment
+
+The merge worker bundles OpenCV 4.13.0 WASM from `vendor/opencv`. Copy this directory beside `merge-worker.js` (outside `app.asar` in future packaged distributions); it contains the Node module, WASM bytes, SHA-256 manifest and licenses. No system OpenCV or runtime network access is used. See [the reproducible build instructions](../vendor/opencv/README.md). The development and production build already copy these files; installer verification remains deferred.

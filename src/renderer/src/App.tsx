@@ -1,3 +1,5 @@
+import { MergeDialog } from './components/MergeDialog'
+import type { MergeMode } from '../../shared/merge'
 import { DisplayDetails } from './components/DisplayDetails'
 import { useDisplayState } from './hooks/useDisplayState'
 import type { PreviewPreference } from '../../shared/hdr-display'
@@ -34,6 +36,7 @@ import { PhotoPreview } from './components/PhotoPreview'
 import styles from './App.module.css'
 
 export function App() {
+  const [mergeTargets, setMergeTargets] = useState<{ ids: string[]; mode: MergeMode } | null>(null)
   const [tasks, setTasks] = useState<BackgroundTask[]>([])
   const [tasksOpen, setTasksOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -128,7 +131,10 @@ export function App() {
   function showContextMenu(photo: Photo, element: HTMLElement, x: number, y: number) {
     actionOrigin.current = element
     setTasksOpen(false)
-    setContextMenu({ x, y, targets: library.contextSelect(photo) })
+    void library.contextSelect(photo).then(
+      (targets) => setContextMenu({ x, y, targets }),
+      (error) => setError(String(error)),
+    )
   }
 
   const refreshTasks = useCallback(async () => {
@@ -162,7 +168,10 @@ export function App() {
 
   useEffect(() => {
     const timers = tasks
-      .filter((task) => task.status === 'completed' && task.finishedAt !== undefined)
+      .filter(
+        (task) =>
+          task.kind !== 'merge' && task.status === 'completed' && task.finishedAt !== undefined,
+      )
       .map((task) =>
         setTimeout(
           () => {
@@ -173,6 +182,29 @@ export function App() {
       )
     return () => timers.forEach(clearTimeout)
   }, [tasks, dismissTask])
+
+  async function openActions(element: HTMLElement) {
+    actionOrigin.current = element
+    const box = element.getBoundingClientRect()
+    try {
+      setContextMenu({ x: box.left, y: box.bottom + 4, targets: await getSelection() })
+    } catch (error) {
+      setError(String(error))
+    }
+  }
+  function openMerge(mode: MergeMode) {
+    if (!contextMenu) return
+    setMergeTargets({ ids: contextMenu.targets.map((p) => p.id), mode })
+    setContextMenu(null)
+  }
+  async function openResult(id: string) {
+    const result = await window.luma.locatePhoto(id)
+    if (result) {
+      await changePage(result.offset)
+      await select(result.photos[result.index - result.offset])
+      setTasksOpen(false)
+    }
+  }
 
   async function openImport() {
     try {
@@ -208,6 +240,9 @@ export function App() {
           <span>Library</span>
         </div>
         <div className={styles.headerActions}>
+          <button aria-haspopup="menu" onClick={(event) => void openActions(event.currentTarget)}>
+            Actions
+          </button>
           <button
             className={styles.headerButton}
             onClick={() => void openImport()}
@@ -377,6 +412,7 @@ export function App() {
           <span>{total} photographs</span>
         </div>
         <TaskCenter
+          onOpenResult={openResult}
           tasks={tasks}
           open={tasksOpen}
           onOpenChange={setTasksOpen}
@@ -407,6 +443,22 @@ export function App() {
           count={contextMenu.targets.length}
           onClose={closeContextMenu}
           onDelete={() => void requestDeletion(contextMenu.targets)}
+          onMerge={openMerge}
+        />
+      )}
+      {mergeTargets && (
+        <MergeDialog
+          ids={mergeTargets.ids}
+          mode={mergeTargets.mode}
+          onClose={() => {
+            setMergeTargets(null)
+            restoreFocus()
+          }}
+          onStarted={() => {
+            setMergeTargets(null)
+            restoreFocus()
+            void refreshTasks()
+          }}
         />
       )}
       {deleteTargets && (

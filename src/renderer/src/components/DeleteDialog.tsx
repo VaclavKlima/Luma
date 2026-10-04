@@ -55,6 +55,10 @@ export function DeleteDialog({
         Luma’s internal copies will move to system Trash. Your source files and SD card will stay
         untouched.
       </p>
+      <p>
+        Merged results remain usable after source deletion, but reproducing their merge requires the
+        original source bytes.
+      </p>
       <ul>
         {photos.slice(0, 5).map((photo) => (
           <li key={photo.id}>{photo.filename}</li>

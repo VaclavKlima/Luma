@@ -1,3 +1,4 @@
+import { MergeError } from '../shared/merge'
 import type { DisplayState } from './display-state'
 import type { PreviewPreference } from '../shared/hdr-display'
 import { createServer } from 'node:http'
@@ -41,6 +42,12 @@ export async function startEditorEndpoint(
       }
       const {
         operation,
+        ids,
+        mode,
+        reviewId,
+        detail,
+        settings,
+        taskId,
         photoId,
         patch,
         expectedRevision,
@@ -54,6 +61,12 @@ export async function startEditorEndpoint(
         target?: 'sdr' | 'current'
         targetGeneration?: number
         preference?: PreviewPreference
+        ids: string[]
+        mode: import('../shared/merge').MergeMode
+        reviewId: string
+        detail?: boolean
+        settings: import('../shared/merge').MergeSettings
+        taskId: string
         operation: string
         photoId: string
         patch: EditPatch
@@ -62,6 +75,45 @@ export async function startEditorEndpoint(
       }
       let result: unknown
       switch (operation) {
+        case 'luma_get_active_merge_review':
+          result = { review: library.getActiveMergeReview() }
+          break
+        case 'luma_get_merge_diagnostics':
+          result = library.getMergeDiagnostics(reviewId, expectedRevision)
+          break
+        case 'luma_create_merge_review':
+          result = await library.createMergeReview(ids, mode)
+          break
+        case 'luma_update_merge_review':
+          result = await library.updateMergeReview(reviewId, expectedRevision, settings)
+          break
+        case 'luma_request_merge_preview':
+          result = await library.requestMergePreview(reviewId, expectedRevision, detail)
+          break
+        case 'luma_start_merge':
+          result = { taskId: library.startMerge(reviewId, expectedRevision) }
+          break
+        case 'luma_dispose_merge_review':
+          await library.disposeMergeReview(reviewId)
+          result = { disposed: true }
+          break
+        case 'luma_get_merge_provenance':
+          result = await library.getMergeProvenance(photoId)
+          break
+        case 'luma_list_tasks':
+          result = { tasks: library.listTasks() }
+          break
+        case 'luma_get_task_errors':
+          result = library.taskErrors(taskId, offset)
+          break
+        case 'luma_cancel_task':
+          await library.cancelTask(taskId)
+          result = { task: library.listTasks().find((task) => task.id === taskId) }
+          break
+        case 'luma_dismiss_task':
+          library.dismissTask(taskId)
+          result = { dismissed: true }
+          break
         case 'luma_get_preview_diagnostics':
           result = {
             ...library.fullPreviews.getDiagnostics(),
@@ -109,7 +161,15 @@ export async function startEditorEndpoint(
       }
       response.end(JSON.stringify({ result }))
     } catch (error) {
-      response.writeHead(400).end(JSON.stringify({ error: String(error) }))
+      response
+        .writeHead(400)
+        .end(
+          JSON.stringify(
+            error instanceof MergeError
+              ? { error: error.message, failure: error.failure }
+              : { error: error instanceof Error ? error.message : String(error) },
+          ),
+        )
     }
   })
   server.requestTimeout = 15000

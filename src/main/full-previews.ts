@@ -70,6 +70,7 @@ export class FullPreviews {
     private processor: FullPreviewProcessor,
     private budget = 2 * 1024 ** 3,
     private options?: (id: string, signal: AbortSignal) => Promise<ProcessingOptions>,
+    private activity?: (busy: boolean) => void,
   ) {
     this.directory = join(root, PREVIEW_VERSION)
   }
@@ -237,6 +238,7 @@ export class FullPreviews {
     else this.active = request
     const work = this.enqueue(async () => {
       this.running = request
+      this.activity?.(true)
       try {
         const check = () => {
           request.abort.signal.throwIfAborted()
@@ -279,7 +281,7 @@ export class FullPreviews {
                   !entry.invalid,
               )
             : undefined
-        if (linearEntry && options) {
+        if (linearEntry && options && !options.metadata.mergeMaster) {
           linearEntry.pins++
           request.linearEntry = linearEntry
           options.workingAsset = {
@@ -520,6 +522,7 @@ export class FullPreviews {
           this.background.delete(request)
         }
         if (this.running === request) this.running = undefined
+        this.activity?.(false)
       }
     })
     request.work = work

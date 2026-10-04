@@ -1,13 +1,14 @@
 import { writeFile } from 'node:fs/promises'
 import { expect, test } from './electron.fixture'
 import { importPhotos } from './import.helpers'
+import { recordBenchmark } from './benchmark.helpers'
 
 test.use({ hdrDisplay: true, hdrImports: true })
 for (const adjustment of ['exposure'] as const)
   test(`benchmarks warmed HDR ${adjustment} gestures through the actual editor`, async ({
     luma,
   }, info) => {
-    test.skip(!process.env.LUMA_PREVIEW_BENCHMARK, 'Run npm run benchmark:preview.')
+    test.skip(process.env.LUMA_PREVIEW_BENCHMARK !== '1', 'Run npm run benchmark:hdr.')
     test.setTimeout(180000)
     luma.page.on('console', (message) => {
       if (message.type() === 'warning') console.log(message.text())
@@ -56,6 +57,18 @@ for (const adjustment of ['exposure'] as const)
       }
     }, adjustment)
     await writeFile(info.outputPath(`${adjustment}-latency.json`), JSON.stringify(result, null, 2))
+    await recordBenchmark(info, {
+      family: 'hdr',
+      measurements: {
+        adjustment,
+        p95Ms: result.p95,
+        backend: result.backend,
+        samples: result.latencies.length,
+        warmupGestures: 5,
+      },
+      gates: [{ metric: 'p95Ms', operator: '<=', limit: 33 }],
+      evidence: [info.outputPath(`${adjustment}-latency.json`)],
+    })
     console.log({ adjustment, p95: result.p95, backend: result.backend })
     expect(result.backend).toBe('webgpu-hdr')
     expect(result.p95).toBeLessThanOrEqual(33)
@@ -64,7 +77,7 @@ for (const adjustment of ['exposure'] as const)
 test('benchmarks cold HDR selection and cached revisits at native resolution', async ({
   luma,
 }, info) => {
-  test.skip(!process.env.LUMA_PREVIEW_BENCHMARK, 'Run npm run benchmark:preview.')
+  test.skip(process.env.LUMA_PREVIEW_BENCHMARK !== '1', 'Run npm run benchmark:hdr.')
   test.setTimeout(180000)
   await importPhotos(
     luma.app,
@@ -122,6 +135,21 @@ test('benchmarks cold HDR selection and cached revisits at native resolution', a
     evidence,
   }
   await writeFile(info.outputPath('selection-latency.json'), JSON.stringify(result, null, 2))
+  await recordBenchmark(info, {
+    family: 'hdr',
+    measurements: {
+      coldMedianMs: result.coldMedian,
+      cachedP95Ms: result.cachedP95,
+      coldSamples: cold.length,
+      cachedSamples: cached.length,
+      backend: 'webgpu-hdr',
+    },
+    gates: [
+      { metric: 'coldMedianMs', operator: '<=', limit: 3000 },
+      { metric: 'cachedP95Ms', operator: '<=', limit: 1000 },
+    ],
+    evidence: [info.outputPath('selection-latency.json')],
+  })
   console.log({ coldMedian: result.coldMedian, cachedP95: result.cachedP95 })
   expect(result.coldMedian).toBeLessThanOrEqual(3000)
   expect(result.cachedP95).toBeLessThanOrEqual(1000)

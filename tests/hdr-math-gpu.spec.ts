@@ -17,7 +17,10 @@ test('HDR CPU and actual WGSL float math agree with independent Float64 referenc
   Object.assign(globalThis, globals)
   retainedGpu = create([])
   const adapter = await retainedGpu.requestAdapter()
-  expect(adapter?.info.isFallbackAdapter).toBe(false)
+  expect(
+    adapter?.info.isFallbackAdapter,
+    'Required hardware GPU is unavailable: no hardware adapter.',
+  ).toBe(false)
   const device = await adapter!.requestDevice()
   const input: RGB[] = [0, 0.18, 1, 2, 4, 16, -0.1].map((v) => [v, v, v])
   for (let i = 0; i < 256; i++) input.push([i / 16, (255 - i) / 128, Math.sin(i) * 0.1])

@@ -34,6 +34,19 @@ export function processingMetadata(
   }
   return {
     ...metadata,
+    capture:
+      number('ExifIFD:ExposureTime') &&
+      number('ExifIFD:ISO') &&
+      metadata.aperture &&
+      metadata.focalLength
+        ? {
+            shutterSeconds: number('ExifIFD:ExposureTime')!,
+            iso: number('ExifIFD:ISO')!,
+            aperture: metadata.aperture,
+            focalLength: metadata.focalLength,
+            focusDistance: number('Sony:FocusDistance2'),
+          }
+        : undefined,
     lensProfile:
       providers
         .map((provider) => provider.resolve(metadata, tags))

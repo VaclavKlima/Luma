@@ -23,14 +23,16 @@ export function WhiteBalance({
             .catch(() => undefined)
         }
       >
-        As Shot
+        {edits.state?.referenceWhiteBalance ? 'Reference white balance' : 'As Shot'}
       </button>
       <p className={styles.demoNote}>
         {!profile
           ? 'White balance is unavailable for this photo. Verified Sony ZV-1/ZV-1A RAW required.'
           : wb?.mode === 'custom'
             ? 'Custom · Luma temperature model'
-            : 'As Shot · estimated Kelvin and Tint'}
+            : edits.state?.referenceWhiteBalance
+              ? 'Reference-based reset · estimated Kelvin and Tint'
+              : 'As Shot · estimated Kelvin and Tint'}
       </p>
       <AdjustmentInput
         key={`${edits.state?.photoId}-temperature`}

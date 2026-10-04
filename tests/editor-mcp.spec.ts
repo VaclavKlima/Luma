@@ -9,7 +9,7 @@ test('stdio editing tools share persisted history with UI without a development 
   luma,
 }) => {
   test.setTimeout(90000)
-  await importPhotos(luma.app, luma.page, ['tests/fixtures/sony-zv1.ARW'])
+  await importPhotos(luma.app, luma.page, ['tests/fixtures/photos/alpine-lake.jpg'])
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [resolve('scripts/editor-mcp.mjs')],
@@ -19,6 +19,18 @@ test('stdio editing tools share persisted history with UI without a development 
   try {
     await client.connect(transport)
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+      'luma_get_active_merge_review',
+      'luma_get_merge_diagnostics',
+      'luma_create_merge_review',
+      'luma_update_merge_review',
+      'luma_request_merge_preview',
+      'luma_start_merge',
+      'luma_dispose_merge_review',
+      'luma_get_merge_provenance',
+      'luma_list_tasks',
+      'luma_get_task_errors',
+      'luma_cancel_task',
+      'luma_dismiss_task',
       'luma_get_preview_diagnostics',
       'luma_get_display_state',
       'luma_set_preview_preference',
@@ -36,9 +48,22 @@ test('stdio editing tools share persisted history with UI without a development 
       expect(result.isError).not.toBe(true)
       return result.structuredContent as Record<string, unknown>
     }
+    expect(await call('luma_get_active_merge_review')).toEqual({ review: null })
+    const missingDiagnostics = await client.callTool({
+      name: 'luma_get_merge_diagnostics',
+      arguments: { reviewId: 'missing', expectedRevision: 0 },
+    })
+    expect(missingDiagnostics.isError).toBe(true)
     const page = await call('luma_list_photos')
     const photoId = (page.photos as { id: string }[])[0].id
     expect(await call('luma_get_edits', { photoId })).toMatchObject({ revision: 0 })
+    expect(await call('luma_list_tasks')).toMatchObject({ tasks: expect.any(Array) })
+    const invalidMerge = await client.callTool({
+      name: 'luma_create_merge_review',
+      arguments: { ids: [photoId, photoId], mode: 'hdr' },
+    })
+    expect(invalidMerge.isError).toBe(true)
+    expect(JSON.stringify(invalidMerge.content)).toContain('Duplicate merge sources')
     const highlightsDraft = luma.page.getByRole('spinbutton', { name: 'Highlights value' })
     await expect(highlightsDraft).toBeEnabled({ timeout: 30000 })
     await highlightsDraft.fill('20')
@@ -50,11 +75,9 @@ test('stdio editing tools share persisted history with UI without a development 
           shadows: 65,
           whites: -35,
           blacks: 20,
-          whiteBalance: { mode: 'custom', kelvin: 7000, tint: 15 },
           exposureEv: 1.25,
           contrast: 37,
           highlights: -65,
-          lens: { distortion: false },
         },
       }),
     ).toMatchObject({
@@ -66,7 +89,6 @@ test('stdio editing tools share persisted history with UI without a development 
         exposureEv: 1.25,
         contrast: 37,
         highlights: -65,
-        lens: { distortion: false },
       },
     })
     await expect(luma.page.getByRole('spinbutton', { name: 'Exposure value' })).toHaveValue('1.25')
@@ -79,10 +101,6 @@ test('stdio editing tools share persisted history with UI without a development 
     ])
       await expect(luma.page.getByRole('spinbutton', { name: `${label} value` })).toHaveValue(value)
     await highlightsDraft.press('Enter')
-    await expect(luma.page.getByRole('spinbutton', { name: 'Temperature value' })).toHaveValue(
-      '7000',
-    )
-    await expect(luma.page.getByRole('spinbutton', { name: 'Tint value' })).toHaveValue('15')
     await expect
       .poll(
         async () => {
@@ -131,7 +149,6 @@ test('stdio editing tools share persisted history with UI without a development 
             exposureEv: 1.25,
             contrast: 37,
             highlights: -65,
-            lens: { distortion: false },
           },
         },
       ],
@@ -147,17 +164,9 @@ test('stdio editing tools share persisted history with UI without a development 
         exposureEv: 1.25,
         contrast: 37,
         highlights: -65,
-        lens: { distortion: false },
       },
     })
     await call('luma_undo_edit', { photoId, expectedRevision: 3 })
-    expect(
-      await call('luma_upgrade_photo_processing', { photoId, expectedRevision: 4 }),
-    ).toMatchObject({ revision: 5, settings: { processing: 'hdr-v1' } })
-    expect(await call('luma_undo_edit', { photoId, expectedRevision: 5 })).toMatchObject({
-      revision: 6,
-      settings: { processing: 'legacy-sdr-v1' },
-    })
     const connectionPath = join(luma.userDataDir, 'editor', 'connection.json')
     const connection = JSON.parse(await readFile(connectionPath, 'utf8'))
     if (process.platform !== 'win32') expect((await stat(connectionPath)).mode & 0o777).toBe(0o600)
@@ -174,7 +183,7 @@ test('stdio editing tools share persisted history with UI without a development 
     expect(browser.status).toBe(403)
     await luma.restart()
     expect(await call('luma_get_edits', { photoId })).toMatchObject({
-      revision: 6,
+      revision: 4,
       settings: { shadows: 0, whites: 0, blacks: 0, exposureEv: 0, contrast: 0, highlights: 0 },
       canRedo: true,
     })

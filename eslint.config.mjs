@@ -9,6 +9,7 @@ export default tseslint.config(
   {
     ignores: [
       'node_modules/**',
+      'vendor/opencv/*.mjs',
       'out/**',
       'dist/**',
       'artifacts/**',

@@ -19,6 +19,7 @@ export interface EditPatch extends Partial<AdjustmentParameters> {
   lens?: Partial<LensSettings>
 }
 export interface EditState {
+  referenceWhiteBalance?: boolean
   hdrEligible?: boolean
   whiteBalanceProfile?: WhiteBalanceProfile
   photoId: string

@@ -1,3 +1,12 @@
+import { MergeReviews } from './merge/reviews'
+import { durableJson, recoverMerges, syncDirectory, verifyMaster } from './merge/store'
+import {
+  MERGE_VERSION,
+  type MergeManifest,
+  type MergeMode,
+  type MergeSettings,
+} from '../shared/merge'
+import { srgbTransform } from '../shared/adjustments'
 import type { HdrAnalysisRequest, HdrPhotoStatistics } from '../shared/hdr-statistics'
 import type { PhotoStatistics } from '../shared/statistics'
 import { SDR_TARGET, type DisplayTarget, HDR_IMPORT_DEFAULT } from '../shared/hdr'
@@ -20,7 +29,7 @@ import {
 } from '../shared/lens'
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
-import { cp, mkdir, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
+import { cp, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, extname, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { RemovalStore } from './removal-store'
@@ -65,6 +74,7 @@ interface Session {
 
 export class PhotoLibrary {
   readonly fullPreviews: FullPreviews
+  readonly merges: MergeReviews
   private db!: DatabaseSync
   private lensTail: Promise<unknown> = Promise.resolve()
   private metadataTail: Promise<unknown> = Promise.resolve()
@@ -93,19 +103,56 @@ export class PhotoLibrary {
     },
     private metadataProcessor: Pick<PreviewProcess, 'inspect' | 'close'> = new PreviewProcess(),
     private hdrImports = HDR_IMPORT_DEFAULT,
+    mergeWorkerPath?: string,
+    private mergeBoundary?: (
+      boundary: 'staged' | 'journaled' | 'published' | 'committed',
+    ) => Promise<void>,
   ) {
+    this.merges = new MergeReviews(
+      root,
+      async (id) => {
+        const photo = this.find(id)
+        if (
+          !photo ||
+          photo.assetKind === 'derived' ||
+          extname(photo.filename).toLowerCase() !== '.arw'
+        )
+          throw new Error('Merge requires original Sony RAW photographs.')
+        const path = join(root, 'originals', id, `original${extname(photo.filename).toLowerCase()}`)
+        let metadata = (await this.processingOptions(id)).metadata
+        if (!metadata.capture) {
+          const work = this.metadataTail.then(() =>
+            this.metadataProcessor.inspect(path, new AbortController().signal),
+          )
+          this.metadataTail = work.catch(() => undefined)
+          metadata = await work
+        }
+        if (!metadata.capture)
+          throw new Error(`${photo.filename}: numeric exposure metadata is unavailable.`)
+        return { path, source: { photo, metadata, capture: metadata.capture, relativeEv: 0 } }
+      },
+      mergeWorkerPath,
+    )
     this.fullPreviews = new FullPreviews(
       join(root, 'cache', 'previews'),
       (id) => {
         if (this.closed) return
         const photo = this.find(id)
         return photo
-          ? join(root, 'originals', id, `original${extname(photo.filename).toLowerCase()}`)
+          ? join(
+              root,
+              'originals',
+              id,
+              photo.assetKind === 'derived'
+                ? 'linear.f32'
+                : `original${extname(photo.filename).toLowerCase()}`,
+            )
           : undefined
       },
       new PreviewProcess(),
       undefined,
       (id, signal) => this.processingOptions(id, signal),
+      (busy) => this.merges.worker.pause(busy),
     )
   }
 
@@ -114,7 +161,7 @@ export class PhotoLibrary {
     this.db = new DatabaseSync(join(this.root, 'catalog.sqlite'))
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     const version = this.db.prepare('PRAGMA user_version').get() as { user_version: number }
-    if (version.user_version > 9) throw new Error('This library requires a newer version of Luma.')
+    if (version.user_version > 10) throw new Error('This library requires a newer version of Luma.')
     this.db.exec(
       'BEGIN; CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, imported_at TEXT NOT NULL, photo TEXT NOT NULL); CREATE TABLE IF NOT EXISTS removals (id TEXT PRIMARY KEY, staged TEXT NOT NULL); CREATE TABLE IF NOT EXISTS processing (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_processing AFTER DELETE ON photos BEGIN DELETE FROM processing WHERE id = old.id; END; CREATE TABLE IF NOT EXISTS edits (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_edits AFTER DELETE ON photos BEGIN DELETE FROM edits WHERE id = old.id; END;',
     )
@@ -177,13 +224,18 @@ export class PhotoLibrary {
         const data = JSON.parse(row.data) as ProcessingOptions
         this.ensureEdits(row.id, data)
       }
-      this.db.exec('PRAGMA user_version = 9; COMMIT;')
+      this.db.exec(
+        'CREATE TABLE IF NOT EXISTS merge_publications (id TEXT PRIMARY KEY, manifest_sha256 TEXT NOT NULL); CREATE TABLE IF NOT EXISTS derived_assets (id TEXT PRIMARY KEY, manifest TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_derived AFTER DELETE ON photos BEGIN DELETE FROM derived_assets WHERE id = old.id; END;',
+      )
+      this.db.exec('PRAGMA user_version = 10; COMMIT;')
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error
     }
     this.removals = new RemovalStore(this.root, this.db, this.trash)
     await this.removals.recover()
+    await recoverMerges(this.root, this.db, (manifest) => this.commitMerge(manifest))
+    await rm(join(this.root, 'merge-reviews'), { recursive: true, force: true })
     // Only application-owned, unpublished files are recovered here.
     await rm(join(this.root, 'staging'), { recursive: true, force: true })
     await mkdir(join(this.root, 'staging'), { recursive: true })
@@ -209,6 +261,17 @@ export class PhotoLibrary {
     const edits = this.ensureEdits(id, data)
     return {
       ...data,
+      workingAsset: data.metadata.mergeMaster
+        ? {
+            path: join(this.root, 'originals', id, 'linear.f32'),
+            width: data.metadata.mergeMaster.asset.width,
+            height: data.metadata.mergeMaster.asset.height,
+            byteLength: data.metadata.mergeMaster.asset.byteLength,
+            sha256: data.metadata.mergeMaster.asset.sha256,
+            transform: srgbTransform,
+            hdr: data.metadata.mergeMaster.asset,
+          }
+        : undefined,
       processing: edits.settings.processing,
       settings: edits.settings.lens,
       adjustments: {
@@ -268,6 +331,7 @@ export class PhotoLibrary {
       revision: data.revision,
       settings: data.settings,
       profile: data.metadata.lensProfile,
+      fixed: !!data.metadata.mergeMaster,
     }
   }
 
@@ -371,6 +435,7 @@ export class PhotoLibrary {
       canRedo,
       hdrEligible: this.readProcessing(photoId)?.metadata.hdrEligible,
       whiteBalanceProfile: this.readProcessing(photoId)?.metadata.whiteBalance,
+      referenceWhiteBalance: !!this.readProcessing(photoId)?.metadata.mergeMaster,
     }
   }
 
@@ -410,6 +475,8 @@ export class PhotoLibrary {
 
   async updateEdits(id: string, patch: EditPatch, expectedRevision: number): Promise<EditState> {
     validatePatch(patch)
+    if (patch.lens && this.find(id)?.assetKind === 'derived')
+      throw new Error('Lens corrections are fixed in merged masters.')
     await this.processingOptions(id)
     if (this.closed || !this.find(id)) throw new Error('This photo is unavailable.')
     const data = this.readProcessing(id)!
@@ -551,6 +618,10 @@ export class PhotoLibrary {
     )
       throw new Error('Finish or cancel the current library operation first.')
     this.assertRecovered()
+    if (this.merges.leased(ids))
+      throw new Error(
+        'Close the merge review or cancel its task before deleting source photographs.',
+      )
     const photos = [...new Set(ids)]
       .map((id) => this.find(id))
       .filter((photo): photo is Photo => Boolean(photo))
@@ -642,7 +713,11 @@ export class PhotoLibrary {
     if (!['running', 'cancelling'].includes(task.snapshot.status)) return
     task.snapshot.status = 'cancelling'
     task.snapshot.title =
-      task.snapshot.kind === 'delete' ? 'Cancelling deletion…' : 'Cancelling import…'
+      task.snapshot.kind === 'delete'
+        ? 'Cancelling deletion…'
+        : task.snapshot.kind === 'merge'
+          ? 'Cancelling merge…'
+          : 'Cancelling import…'
     this.changed()
     if (task.abort) {
       task.abort.abort()
@@ -660,7 +735,10 @@ export class PhotoLibrary {
   }
 
   private assertRecovered(): void {
-    if (this.db.prepare('SELECT 1 FROM removals LIMIT 1').get())
+    if (
+      this.db.prepare('SELECT 1 FROM removals LIMIT 1').get() ||
+      this.db.prepare('SELECT 1 FROM merge_publications LIMIT 1').get()
+    )
       throw new Error(
         'An interrupted deletion needs recovery. Restart Luma before changing the library.',
       )
@@ -1092,6 +1170,7 @@ export class PhotoLibrary {
     )
       return
     const parts = parsed.pathname.slice(1).split('/')
+    if (parsed.hostname === 'merge') return this.merges.imagePath(parts)
     if (parsed.hostname === 'library' && parts.length === 2) {
       const [id, kind] = parts
       if (hashPattern.test(id) && ['thumb', 'preview'].includes(kind) && this.find(id)) {
@@ -1112,6 +1191,215 @@ export class PhotoLibrary {
     }
   }
 
+  getActiveMergeReview() {
+    return this.merges.active()
+  }
+  getMergeDiagnostics(id: string, revision: number) {
+    return this.merges.diagnostics(id, revision)
+  }
+  async createMergeReview(ids: string[], mode: MergeMode) {
+    if (this.closed || this.hasActiveTask() || this.session?.phase === 'scanning')
+      throw new Error('Finish the current library operation first.')
+    return this.merges.create(ids, mode)
+  }
+  updateMergeReview(id: string, revision: number, settings: MergeSettings) {
+    return this.merges.update(id, revision, settings)
+  }
+  requestMergePreview(id: string, revision: number, detail = false) {
+    return this.merges.preview(id, revision, detail)
+  }
+  disposeMergeReview(id: string) {
+    return this.merges.dispose(id)
+  }
+  async getMergeProvenance(id: string) {
+    const row = this.db.prepare('SELECT manifest FROM derived_assets WHERE id = ?').get(id) as
+      { manifest: string } | undefined
+    if (!row) throw new Error('This photo is not a merged asset.')
+    const manifest = JSON.parse(row.manifest) as MergeManifest
+    const available = await Promise.all(
+      manifest.recipe.sources.map(async (source) => {
+        const photo = this.find(source.id)
+        return (
+          !!photo &&
+          existsSync(
+            join(
+              this.root,
+              'originals',
+              source.id,
+              `original${extname(photo.filename).toLowerCase()}`,
+            ),
+          )
+        )
+      }),
+    )
+    return { manifest, reproducible: available.every(Boolean) }
+  }
+  private commitMerge(manifest: MergeManifest) {
+    const { photo, metadata } = manifest
+    this.db.exec('BEGIN')
+    try {
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO photos (id, imported_at, photo, processing_identity) VALUES (?, ?, ?, 'hdr-v1')",
+        )
+        .run(photo.id, photo.importedAt, JSON.stringify(photo))
+      this.db
+        .prepare('INSERT OR IGNORE INTO derived_assets (id, manifest) VALUES (?, ?)')
+        .run(photo.id, JSON.stringify(manifest))
+      const options: ProcessingOptions = {
+        processing: 'hdr-v1',
+        metadata: { ...metadata, mergeMaster: { asset: manifest.asset, recipe: manifest.recipe } },
+        settings: { distortion: false, vignetting: false, chromaticAberration: false },
+        revision: 0,
+      }
+      this.db
+        .prepare('INSERT OR IGNORE INTO processing (id, data) VALUES (?, ?)')
+        .run(photo.id, JSON.stringify(options))
+      this.ensureEdits(photo.id, options)
+      this.db.prepare('DELETE FROM merge_publications WHERE id = ?').run(photo.id)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+  startMerge(reviewId: string, revision: number): string {
+    if (this.closed || this.hasActiveTask() || this.session?.phase === 'scanning')
+      throw new Error('Finish the current library operation first.')
+    this.assertRecovered()
+    const accepted = this.merges.accept(reviewId, revision),
+      id = randomUUID()
+    const task = {
+      snapshot: {
+        id,
+        kind: 'merge',
+        title: 'Merging photographs',
+        status: 'running',
+        phase: 'Preparing native master',
+        errorCount: 0,
+        progress: { completed: 0, total: 3, unit: 'items' },
+      } as BackgroundTask,
+      errors: [] as TaskErrorPage['errors'],
+      abort: new AbortController(),
+      work: Promise.resolve(),
+    }
+    this.tasks.set(id, task)
+    this.changed()
+    task.work = (async () => {
+      let pendingDirectory: string | undefined
+      let journaled = false
+      try {
+        const { review } = accepted
+        const { result, output } = await accepted.render(
+          task.abort.signal,
+          (phase, completed, total) => {
+            task.snapshot.phase = phase
+            task.snapshot.detail = total
+              ? `${Math.round((completed / total) * 100)}% of this phase`
+              : undefined
+            this.changed()
+          },
+        )
+        task.snapshot.title = 'Publishing merged photo'
+        const publicationStart = performance.now()
+        task.snapshot.phase = 'Verifying master'
+        task.snapshot.detail = undefined
+        this.changed()
+        const photoId = createHash('sha256').update(randomUUID()).digest('hex'),
+          directory = join(this.root, 'merge-publications', photoId)
+        const reference = review.sources.find((s) => s.photo.id === review.settings.referenceId)!
+        const photo: Photo = {
+          id: photoId,
+          assetKind: 'derived',
+          filename: `${basename(reference.photo.filename, extname(reference.photo.filename))}-${review.settings.mode === 'hdr' ? 'HDR' : 'Stack'}.luma`,
+          format: 'LUMA HDR',
+          bytes: result.asset.byteLength,
+          width: result.asset.width,
+          height: result.asset.height,
+          importedAt: new Date().toISOString(),
+          thumbnailUrl: `luma-photo://library/${photoId}/thumb`,
+          previewUrl: `luma-photo://library/${photoId}/preview`,
+          previewSource: 'decoded',
+          camera: reference.photo.camera,
+          lens: reference.photo.lens,
+        }
+        const metadata = { ...reference.metadata, capture: undefined, mergeMaster: undefined }
+        const manifest: MergeManifest = {
+          version: MERGE_VERSION,
+          photo,
+          metadata,
+          asset: result.asset,
+          recipe: result.recipe,
+        }
+        await verifyMaster(output, manifest)
+        task.abort.signal.throwIfAborted()
+        pendingDirectory = directory
+        await mkdir(directory, { recursive: true })
+        let copiedBytes = 0
+        for (const name of ['linear.f32', 'motion.mask', 'thumb.jpg', 'preview.jpg']) {
+          task.abort.signal.throwIfAborted()
+          await cp(join(output, name), join(directory, name), { errorOnExist: true, force: false })
+          copiedBytes += (await stat(join(directory, name))).size
+          const file = await open(join(directory, name), 'r+')
+          try {
+            await file.sync()
+          } finally {
+            await file.close()
+          }
+        }
+        await durableJson(join(directory, 'manifest.json'), manifest)
+        await verifyMaster(directory, manifest)
+        await syncDirectory(directory)
+        await syncDirectory(join(this.root, 'merge-publications'))
+        await this.mergeBoundary?.('staged')
+        task.abort.signal.throwIfAborted()
+        // Once journaled, finish publication even when cancellation arrives.
+        this.db
+          .prepare('INSERT INTO merge_publications (id, manifest_sha256) VALUES (?, ?)')
+          .run(photoId, createHash('sha256').update(JSON.stringify(manifest)).digest('hex'))
+        journaled = true
+        await this.mergeBoundary?.('journaled')
+        task.snapshot.phase = 'Publishing master'
+        task.snapshot.progress!.completed = 2
+        this.changed()
+        await rename(directory, join(this.root, 'originals', photoId))
+        await syncDirectory(join(this.root, 'originals'))
+        await syncDirectory(join(this.root, 'merge-publications'))
+        await this.mergeBoundary?.('published')
+        this.commitMerge(manifest)
+        await this.mergeBoundary?.('committed')
+        const measurements = structuredClone(result.measurements)
+        measurements.stages.publication = performance.now() - publicationStart
+        measurements.runtimeMs += measurements.stages.publication
+        measurements.disk.readBytes +=
+          copiedBytes +
+          (result.asset.byteLength +
+            result.recipe.maskDimensions.width * result.recipe.maskDimensions.height) *
+            2
+        measurements.disk.writtenBytes += copiedBytes + Buffer.byteLength(JSON.stringify(manifest))
+        task.snapshot.mergeMeasurements = measurements
+        task.snapshot.resultPhotoId = photoId
+        task.snapshot.progress!.completed = 3
+        task.snapshot.status = 'completed'
+        task.snapshot.title = 'Merged photo ready'
+      } catch (error) {
+        task.snapshot.status = task.abort.signal.aborted ? 'cancelled' : 'failed'
+        task.snapshot.title = task.abort.signal.aborted ? 'Merge cancelled' : 'Merge failed'
+        if (!task.abort.signal.aborted) {
+          task.errors.push({ filename: 'Merge', message: errorMessage(error) })
+          task.snapshot.errorCount = 1
+        }
+      } finally {
+        if (pendingDirectory && !journaled)
+          await rm(pendingDirectory, { recursive: true, force: true })
+        await this.merges.dispose(reviewId, true)
+        task.snapshot.finishedAt = Date.now()
+        this.changed(undefined, true)
+      }
+    })()
+    return id
+  }
+
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
@@ -1125,6 +1413,7 @@ export class PhotoLibrary {
           await this.cancelTask(id)
       }
       if (this.session) await this.dispose(this.session.id)
+      await this.merges.close()
     } finally {
       try {
         await this.processor.close()

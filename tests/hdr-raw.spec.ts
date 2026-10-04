@@ -1,14 +1,54 @@
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { expect, test } from '@playwright/test'
+import { expect, test as base } from '@playwright/test'
 import { librawDecoder } from '../src/main/processing/decoders/libraw'
 import { RawGpuRenderer } from '../src/main/gpu/raw-renderer'
 import { neutralAdjustments } from '../src/shared/adjustments'
 import { PreviewEngine } from '../src/main/preview-engine'
 import { readHdrStrips, scanHdr } from '../src/main/processing/hdr-processing'
-import { mkdir, stat, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, readdir, chmod, stat, writeFile, readFile } from 'node:fs/promises'
 import { analyzeHdr, hdrStatistics } from '../src/shared/hdr-statistics'
 import { SDR_TARGET } from '../src/shared/hdr'
+
+// Only the two read-only correction checks share preparation. Cold decoding,
+// cache recovery/cancellation and CPU references below always remain fresh.
+const test = base.extend<
+  object,
+  {
+    correctedHdr: {
+      output: string
+      result: Awaited<ReturnType<PreviewEngine['renderFull']>>
+    }
+  }
+>({
+  correctedHdr: [
+    // eslint-disable-next-line no-empty-pattern -- Playwright requires destructured fixtures.
+    async ({}, use) => {
+      const output = await mkdtemp(join(tmpdir(), 'luma-hdr-corrected-'))
+      const engine = new PreviewEngine()
+      try {
+        const path = 'tests/fixtures/sony-zv1.ARW',
+          metadata = await engine.inspect(path)
+        const result = await engine.renderFull(path, output, undefined, {
+          metadata,
+          settings: { distortion: true, vignetting: true, chromaticAberration: true },
+          revision: 0,
+          processing: 'hdr-v1',
+          adjustments: neutralAdjustments,
+        })
+        expect(result.diagnostics?.backend, JSON.stringify(result.diagnostics)).toBe('gpu')
+        await engine.close()
+        for (const file of await readdir(output)) await chmod(join(output, file), 0o444)
+        await use(Object.freeze({ output, result: Object.freeze(result) }))
+      } finally {
+        await engine.close()
+        await rm(output, { recursive: true, force: true })
+      }
+    },
+    { scope: 'worker', timeout: 120000 },
+  ],
+})
 
 const samples: string[] = [
   'tests/fixtures/sony-zv1.ARW',
@@ -75,95 +115,79 @@ for (const sample of samples)
     }
   })
 
-// eslint-disable-next-line no-empty-pattern -- Playwright requires destructured fixtures.
-test('HDR lens preparation streams validated working data and an SDR proof', async ({}, info) => {
+test('HDR lens preparation streams validated working data and an SDR proof', async ({
+  correctedHdr,
+}, info) => {
   test.setTimeout(120000)
-  const engine = new PreviewEngine()
-  const path = 'tests/fixtures/sony-zv1.ARW'
-  const output = info.outputPath('hdr')
-  await mkdir(output)
-  try {
-    const metadata = await engine.inspect(path)
-    const options = {
-      metadata,
-      settings: { distortion: true, vignetting: true, chromaticAberration: true },
-      revision: 0,
-      processing: 'hdr-v1' as const,
-      adjustments: neutralAdjustments,
-    }
-    const result = await engine.renderFull(path, output, undefined, options)
-    const asset = result.linear!.hdr!
-    await writeFile(info.outputPath('working-descriptor.json'), JSON.stringify(asset, null, 2))
-    expect((await stat(`${output}/linear.f32`)).size).toBe(asset.byteLength)
-    let above = 0,
-      negative = 0
-    for await (const data of readHdrStrips(`${output}/linear.f32`, asset))
-      for (let i = 0; i < data.length; i += 4)
-        for (let c = 0; c < 3; c++) {
-          above += Number(data[i + c] > 1)
-          negative += Number(data[i + c] < 0)
-        }
-    expect(above).toBeGreaterThan(0)
-    expect(negative).toBeGreaterThan(0)
-    const statistics = await scanHdr(`${output}/linear.f32`, {
-      asset,
-      adjustments: neutralAdjustments,
-      domain: 'working-hdr',
-      target: SDR_TARGET,
-    })
-    const count = Math.min(65536, asset.width * asset.height),
-      sampled = new Float32Array(count * 4)
-    let next = 0,
-      offset = 0
-    for await (const data of readHdrStrips(`${output}/linear.f32`, asset)) {
-      while (next < count) {
-        const position = Math.floor(((next + 0.5) * asset.width * asset.height) / count)
-        if (position >= offset + data.length / 4) break
-        sampled.set(data.subarray((position - offset) * 4, (position - offset) * 4 + 4), next++ * 4)
+  const { output, result } = correctedHdr
+  const asset = result.linear!.hdr!
+  await writeFile(info.outputPath('working-descriptor.json'), JSON.stringify(asset, null, 2))
+  expect((await stat(`${output}/linear.f32`)).size).toBe(asset.byteLength)
+  let above = 0,
+    negative = 0
+  for await (const data of readHdrStrips(`${output}/linear.f32`, asset))
+    for (let i = 0; i < data.length; i += 4)
+      for (let c = 0; c < 3; c++) {
+        above += Number(data[i + c] > 1)
+        negative += Number(data[i + c] < 0)
       }
-      offset += data.length / 4
+  expect(above).toBeGreaterThan(0)
+  expect(negative).toBeGreaterThan(0)
+  const statistics = await scanHdr(`${output}/linear.f32`, {
+    asset,
+    adjustments: neutralAdjustments,
+    domain: 'working-hdr',
+    target: SDR_TARGET,
+  })
+  const count = Math.min(65536, asset.width * asset.height),
+    sampled = new Float32Array(count * 4)
+  let next = 0,
+    offset = 0
+  for await (const data of readHdrStrips(`${output}/linear.f32`, asset)) {
+    while (next < count) {
+      const position = Math.floor(((next + 0.5) * asset.width * asset.height) / count)
+      if (position >= offset + data.length / 4) break
+      sampled.set(data.subarray((position - offset) * 4, (position - offset) * 4 + 4), next++ * 4)
     }
-    const approximate = hdrStatistics('working-hdr', SDR_TARGET, asset, false)
-    analyzeHdr(sampled, neutralAdjustments, asset, SDR_TARGET, approximate)
-    let actualCdf = 0,
-      approximateCdf = 0,
-      maximumCdfError = 0
-    for (let bin = 0; bin < 256; bin++) {
-      actualCdf += statistics.bins[bin] / statistics.visiblePixels
-      approximateCdf += approximate.bins[bin] / approximate.visiblePixels
-      maximumCdfError = Math.max(maximumCdfError, Math.abs(actualCdf - approximateCdf))
-    }
-    expect(maximumCdfError).toBeLessThanOrEqual(0.01)
-    expect(statistics.visiblePixels).toBe(asset.width * asset.height)
-    expect(
-      statistics.bins.reduce((a, b) => a + b, 0) +
-        statistics.zero +
-        statistics.negative +
-        statistics.underflow +
-        statistics.overflow,
-    ).toBe(statistics.visiblePixels)
-    console.log({
-      width: result.width,
-      height: result.height,
-      above,
-      negative,
-      diagnostics: result.diagnostics,
-    })
-  } finally {
-    await engine.close()
+    offset += data.length / 4
   }
+  const approximate = hdrStatistics('working-hdr', SDR_TARGET, asset, false)
+  analyzeHdr(sampled, neutralAdjustments, asset, SDR_TARGET, approximate)
+  let actualCdf = 0,
+    approximateCdf = 0,
+    maximumCdfError = 0
+  for (let bin = 0; bin < 256; bin++) {
+    actualCdf += statistics.bins[bin] / statistics.visiblePixels
+    approximateCdf += approximate.bins[bin] / approximate.visiblePixels
+    maximumCdfError = Math.max(maximumCdfError, Math.abs(actualCdf - approximateCdf))
+  }
+  expect(maximumCdfError).toBeLessThanOrEqual(0.01)
+  expect(statistics.visiblePixels).toBe(asset.width * asset.height)
+  expect(
+    statistics.bins.reduce((a, b) => a + b, 0) +
+      statistics.zero +
+      statistics.negative +
+      statistics.underflow +
+      statistics.overflow,
+  ).toBe(statistics.visiblePixels)
+  console.log({
+    width: result.width,
+    height: result.height,
+    above,
+    negative,
+    diagnostics: result.diagnostics,
+  })
 })
 
-// eslint-disable-next-line no-empty-pattern -- Playwright requires destructured fixtures.
-test('CPU HDR preparation keeps signed highlights and agrees with GPU corrected working data', async ({}, info) => {
+test('CPU HDR preparation keeps signed highlights and agrees with GPU corrected working data', async ({
+  correctedHdr,
+}, info) => {
   test.setTimeout(180000)
-  const cpu = new PreviewEngine(undefined, 'cpu'),
-    gpu = new PreviewEngine()
+  const cpu = new PreviewEngine(undefined, 'cpu')
   const path = 'tests/fixtures/sony-zv1.ARW',
     cpuPath = info.outputPath('cpu'),
-    gpuPath = info.outputPath('gpu')
+    gpuPath = correctedHdr.output
   await mkdir(cpuPath)
-  await mkdir(gpuPath)
   try {
     const metadata = await cpu.inspect(path)
     const options = {
@@ -174,7 +198,7 @@ test('CPU HDR preparation keeps signed highlights and agrees with GPU corrected 
       adjustments: neutralAdjustments,
     }
     const a = await cpu.renderFull(path, cpuPath, undefined, options)
-    const b = await gpu.renderFull(path, gpuPath, undefined, options)
+    const b = correctedHdr.result
     expect(a.diagnostics?.backend).toBe('cpu')
     expect([a.width, a.height]).toEqual([b.width, b.height])
     expect(a.linear!.hdr!.source.normalization).toEqual(b.linear!.hdr!.source.normalization)
@@ -201,7 +225,6 @@ test('CPU HDR preparation keeps signed highlights and agrees with GPU corrected 
     console.log({ correctedMeanError: sum / count, above, negative })
   } finally {
     await cpu.close()
-    await gpu.close()
   }
 })
 

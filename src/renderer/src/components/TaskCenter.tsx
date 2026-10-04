@@ -5,6 +5,7 @@ import { TaskProgress } from './TaskProgress'
 import styles from './TaskProgress.module.css'
 
 interface TaskCenterProps {
+  onOpenResult: (id: string) => Promise<void>
   tasks: BackgroundTask[]
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -20,6 +21,7 @@ export function TaskCenter({
   onCancel,
   onDismiss,
   getErrors,
+  onOpenResult,
 }: TaskCenterProps) {
   const root = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
@@ -83,6 +85,7 @@ export function TaskCenter({
                 onCancel={onCancel}
                 onDismiss={onDismiss}
                 getErrors={getErrors}
+                onOpenResult={onOpenResult}
               />
             ))}
           </div>
@@ -97,7 +100,10 @@ function TaskDetails({
   onCancel,
   onDismiss,
   getErrors,
-}: Pick<TaskCenterProps, 'onCancel' | 'onDismiss' | 'getErrors'> & { task: BackgroundTask }) {
+  onOpenResult,
+}: Pick<TaskCenterProps, 'onCancel' | 'onDismiss' | 'getErrors' | 'onOpenResult'> & {
+  task: BackgroundTask
+}) {
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const [errorsOpen, setErrorsOpen] = useState(false)
@@ -133,6 +139,7 @@ function TaskDetails({
   return (
     <article className={styles.task} data-testid={`task-${task.id}`} data-status={task.status}>
       <strong role="status">{task.title}</strong>
+      {task.phase && <p>{task.phase}</p>}
       {task.detail && (
         <p className={styles.filename} title={task.detail}>
           {task.detail}
@@ -156,6 +163,11 @@ function TaskDetails({
         </p>
       )}
       <div className={styles.actions}>
+        {task.resultPhotoId && (
+          <button onClick={() => void act(() => onOpenResult(task.resultPhotoId!))}>
+            Open result
+          </button>
+        )}
         {task.errorCount > 0 && (
           <button aria-expanded={errorsOpen} onClick={() => setErrorsOpen(!errorsOpen)}>
             {errorsOpen ? 'Hide' : 'Show'} {task.errorCount} errors

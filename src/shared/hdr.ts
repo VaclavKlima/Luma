@@ -33,6 +33,7 @@ export interface HdrNormalization {
   sourceSaturation: { thresholds: number[]; saturatedSites: number; totalSites: number } | null
 }
 export interface HdrSource {
+  composite?: { kind: 'hdr' | 'noise'; sourceCount: number }
   version: typeof HDR_SOURCE_VERSION
   processing: 'hdr-v1'
   colorSpace: 'rec2020'
@@ -229,6 +230,15 @@ export function encodeHdr(v: number): number {
 
 /** Validate provenance before a working asset can enter any HDR processing stage. */
 export function validateHdrSource(source: HdrSource): void {
+  if (
+    source?.composite &&
+    (!['hdr', 'noise'].includes(source.composite.kind) ||
+      !Number.isInteger(source.composite.sourceCount) ||
+      source.composite.sourceCount < 2 ||
+      source.composite.sourceCount > 32 ||
+      source.normalization?.sourceSaturation !== null)
+  )
+    throw new Error('Invalid composite provenance.')
   const normalization = source?.normalization
   if (
     !source ||

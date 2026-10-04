@@ -156,7 +156,8 @@ export function useLibrary(onError: (error: string) => void) {
   }, [])
 
   const contextSelect = useCallback(
-    (photo: Photo) => {
+    async (photo: Photo) => {
+      await getSelection()
       request.current++
       navigating.current = false
       selectionError.current = null
@@ -173,7 +174,7 @@ export function useLibrary(onError: (error: string) => void) {
       void refresh()
       return [...selected.values()]
     },
-    [refresh, update],
+    [getSelection, refresh, update],
   )
 
   const navigate = useCallback(

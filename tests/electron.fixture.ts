@@ -155,6 +155,12 @@ export const test = base.extend<{ luma: DesktopSession; hdrDisplay: boolean; hdr
           if (page && !page.isClosed()) {
             await page
               .screenshot({ path: testInfo.outputPath('failure.png') })
+              .then(() =>
+                testInfo.attach('Failure screenshot', {
+                  path: testInfo.outputPath('failure.png'),
+                  contentType: 'image/png',
+                }),
+              )
               .catch(() => undefined)
           }
         }

@@ -30,7 +30,11 @@
     "mcp:editor:test": "node scripts/verify.mjs --editor",
     "verify": "node scripts/verify.mjs",
     "check:full": "node scripts/verify.mjs --full",
-    "benchmark:adjustments": "node scripts/verify.mjs --adjustment-benchmark"
+    "check:all": "node scripts/verify.mjs --all",
+    "benchmark:adjustments": "node scripts/verify.mjs --adjustment-benchmark",
+    "benchmark:hdr": "node scripts/verify.mjs --hdr-benchmark",
+    "benchmark:merge": "node scripts/verify.mjs --merge-benchmark",
+    "benchmark:all": "node scripts/verify.mjs --benchmark-all"
   },
   "dependencies": {
     "@colorhythm/libraw-wasm": "^1.1.1",

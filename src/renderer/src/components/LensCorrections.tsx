@@ -80,13 +80,16 @@ export function LensCorrections({
         data-revision={state?.revision}
       >
         <p className={styles.lensProfile}>{state?.profile.label ?? 'Reading lens metadata…'}</p>
+        {state?.fixed && (
+          <p>Lens corrections were applied during merge preparation and are fixed.</p>
+        )}
         {correctionKinds.map((kind) => (
           <div key={kind} className={styles.lensCorrection}>
             <label>
               <input
                 type="checkbox"
-                checked={!!state?.settings[kind] && !!state.profile[kind]}
-                disabled={!state?.profile[kind]}
+                checked={!!state?.profile[kind] && (state.fixed || !!state.settings[kind])}
+                disabled={state?.fixed || !state?.profile[kind]}
                 aria-describedby={!state?.profile[kind] ? `lens-${kind}-reason` : undefined}
                 onChange={(event) => void update(kind, event.target.checked)}
               />

@@ -33,6 +33,8 @@ export interface LensProfile {
   unavailable: Partial<Record<CorrectionKind, string>>
 }
 export interface ProcessingMetadata {
+  capture?: import('./merge').MergeCapture
+  mergeMaster?: { asset: HdrWorkingAsset; recipe: import('./merge').MergeRecipe }
   hdrEligible?: boolean
   whiteBalance?: WhiteBalanceProfile
   version: number
@@ -45,6 +47,7 @@ export interface ProcessingMetadata {
   lensProfile: LensProfile
 }
 export interface LensState {
+  fixed?: boolean
   photoId: string
   revision: number
   settings: LensSettings

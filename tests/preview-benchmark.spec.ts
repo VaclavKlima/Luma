@@ -6,10 +6,11 @@ import { PreviewProcess } from '../src/main/preview-process'
 import type { PreviewPresenter } from '../src/renderer/src/preview/presenter'
 import { automaticLensSettings } from '../src/shared/lens'
 import { expect, test } from './electron.fixture'
+import { recordBenchmark } from './benchmark.helpers'
 
 test('benchmarks RAW processing and actual Electron frame presentation', async ({ luma }, info) => {
   test.skip(
-    !process.env.LUMA_PREVIEW_BENCHMARK,
+    process.env.LUMA_PREVIEW_BENCHMARK !== '1',
     'Run npm run benchmark:preview for the hardware benchmark.',
   )
   test.setTimeout(300_000)
@@ -232,9 +233,43 @@ process.on('message',async ({path,output,type})=>{
       info.outputPath('benchmark.json'),
       JSON.stringify({ sample: basename(sample), medians, results }, null, 2),
     )
+    const baseline = process.env.LUMA_PREVIEW_BASELINE
+      ? JSON.parse(await readFile(process.env.LUMA_PREVIEW_BASELINE, 'utf8'))
+      : undefined
+    await recordBenchmark(info, {
+      family: 'preview',
+      measurements: {
+        sample: basename(sample),
+        medians,
+        coldSamplesPerBackend: 4,
+        cachedSamplesPerBackend: 32,
+        ...(baseline
+          ? {
+              uncorrectedRegressionPercent: Object.fromEntries(
+                ['cpu', 'gpu'].map((kind) => [
+                  kind,
+                  (medians[kind] / baseline.medians[kind] - 1) * 100,
+                ]),
+              ),
+            }
+          : {}),
+      },
+      gates: [
+        { metric: 'gpu-corrected', operator: '<', limit: medians['cpu-corrected'] },
+        { metric: 'gpu', operator: '<', limit: Math.min(medians.legacy, medians.cpu) },
+        { metric: 'gpu-cached', operator: '<', limit: medians['legacy-cached'] * 1.15 },
+        ...(baseline
+          ? ['cpu', 'gpu'].map((kind) => ({
+              metric: kind,
+              operator: '<' as const,
+              limit: baseline.medians[kind] * 1.15,
+            }))
+          : []),
+      ],
+      evidence: [info.outputPath('benchmark.json')],
+    })
     expect(medians['gpu-corrected']).toBeLessThan(medians['cpu-corrected'])
-    if (process.env.LUMA_PREVIEW_BASELINE) {
-      const baseline = JSON.parse(await readFile(process.env.LUMA_PREVIEW_BASELINE, 'utf8'))
+    if (baseline) {
       for (const kind of ['cpu', 'gpu'])
         expect(medians[kind], `${kind} uncorrected regression`).toBeLessThan(
           baseline.medians[kind] * 1.15,

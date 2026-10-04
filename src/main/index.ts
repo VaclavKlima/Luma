@@ -1,3 +1,4 @@
+import { mergeFailure } from '../shared/merge'
 import { HDR_IMPORT_DEFAULT } from '../shared/hdr'
 import { DisplayState } from './display-state'
 import { installWaylandDisplayRefresh } from './wayland-display'
@@ -282,6 +283,45 @@ app
       trusted(event)
       return displayState.report(capabilities)
     })
+    async function mergeReply<T>(operation: () => T | Promise<T>) {
+      try {
+        return { result: await operation() }
+      } catch (error) {
+        return { error: mergeFailure(error) }
+      }
+    }
+    ipcMain.handle('merge:active', (event) => {
+      trusted(event)
+      return mergeReply(() => library!.getActiveMergeReview())
+    })
+    ipcMain.handle('merge:diagnostics', (event, id, revision) => {
+      trusted(event)
+      return mergeReply(() => library!.getMergeDiagnostics(id, revision))
+    })
+    ipcMain.handle('merge:create', (event, ids, mode) => {
+      trusted(event)
+      return mergeReply(() => library!.createMergeReview(ids, mode))
+    })
+    ipcMain.handle('merge:update', (event, id, revision, settings) => {
+      trusted(event)
+      return mergeReply(() => library!.updateMergeReview(id, revision, settings))
+    })
+    ipcMain.handle('merge:preview', (event, id, revision, detail) => {
+      trusted(event)
+      return mergeReply(() => library!.requestMergePreview(id, revision, detail))
+    })
+    ipcMain.handle('merge:start', (event, id, revision) => {
+      trusted(event)
+      return mergeReply(() => library!.startMerge(id, revision))
+    })
+    ipcMain.handle('merge:dispose', (event, id) => {
+      trusted(event)
+      return mergeReply(() => library!.disposeMergeReview(id))
+    })
+    ipcMain.handle('merge:provenance', (event, id) => {
+      trusted(event)
+      return mergeReply(() => library!.getMergeProvenance(id))
+    })
     ipcMain.handle('edits:upgrade-processing', (event, id, revision) => {
       trusted(event)
       return library!.upgradePhotoProcessing(id, revision)
@@ -352,7 +392,10 @@ app
       if (!path || request.method !== 'GET') return new Response(null, { status: 404 })
       try {
         return new Response(await readFile(path), {
-          headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' },
+          headers: {
+            'Content-Type': path.endsWith('.png') ? 'image/png' : 'image/jpeg',
+            'Cache-Control': 'no-store',
+          },
         })
       } catch {
         return new Response(null, { status: 404 })

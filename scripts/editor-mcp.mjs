@@ -20,7 +20,89 @@ const schema = (properties, required = Object.keys(properties)) => ({
   required,
   additionalProperties: false,
 })
+const mergeSettings = schema({
+  mode: { enum: ['hdr', 'noise'] },
+  referenceId: photoId,
+  autoAlign: { type: 'boolean' },
+  autoCrop: { type: 'boolean' },
+  deghost: { type: 'boolean' },
+  strength: { type: 'integer', minimum: 0, maximum: 100 },
+})
+const reviewId = { type: 'string' }
 const tools = [
+  {
+    name: 'luma_get_active_merge_review',
+    description: 'Read the active merge review without starting or recomputing processing.',
+    inputSchema: schema({}),
+  },
+  {
+    name: 'luma_get_merge_diagnostics',
+    description:
+      'Read alignment diagnostics and structured failure for the current review revision, including after failure. No paths are returned.',
+    inputSchema: schema({ reviewId, expectedRevision }),
+  },
+  {
+    name: 'luma_create_merge_review',
+    description:
+      'Validate 2–32 Sony RAW photo IDs and lease their sources for HDR or noise stacking.',
+    inputSchema: schema({
+      ids: { type: 'array', items: photoId, minItems: 2, maxItems: 32, uniqueItems: true },
+      mode: { enum: ['hdr', 'noise'] },
+    }),
+  },
+  {
+    name: 'luma_update_merge_review',
+    description:
+      'Update bounded merge settings using the current review revision; cancels superseded preparation.',
+    inputSchema: schema({ reviewId, expectedRevision, settings: mergeSettings }),
+  },
+  {
+    name: 'luma_request_merge_preview',
+    description:
+      'Prepare and validate the linear merge. Returns application image URLs and the reviewed recipe.',
+    inputSchema: schema({ reviewId, expectedRevision, detail: { type: 'boolean' } }, [
+      'reviewId',
+      'expectedRevision',
+    ]),
+  },
+  {
+    name: 'luma_start_merge',
+    description:
+      'Freeze the prepared recipe and publish a new editable master as a background task.',
+    inputSchema: schema({ reviewId, expectedRevision }),
+  },
+  {
+    name: 'luma_dispose_merge_review',
+    description: 'Cancel review preparation and release source leases.',
+    inputSchema: schema({ reviewId }),
+  },
+  {
+    name: 'luma_get_merge_provenance',
+    description: 'Read permanent recipe, source capture metadata and source availability.',
+    inputSchema: schema({ photoId }),
+  },
+  {
+    name: 'luma_list_tasks',
+    description: 'Read background task progress and result photo IDs.',
+    inputSchema: schema({}),
+  },
+  {
+    name: 'luma_get_task_errors',
+    description: 'Read a page of background task errors.',
+    inputSchema: schema({ taskId: { type: 'string' }, offset: { type: 'integer', minimum: 0 } }, [
+      'taskId',
+    ]),
+  },
+  {
+    name: 'luma_cancel_task',
+    description: 'Cancel a background task, waiting for durable publication when necessary.',
+    inputSchema: schema({ taskId: { type: 'string' } }),
+  },
+  {
+    name: 'luma_dismiss_task',
+    description: 'Dismiss a finished task.',
+    inputSchema: schema({ taskId: { type: 'string' } }),
+  },
   {
     name: 'luma_get_preview_diagnostics',
     description:
@@ -143,10 +225,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       method: 'POST',
       headers: { Authorization: `Bearer ${connection.token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...request.params.arguments, operation: request.params.name }),
-      signal: AbortSignal.timeout(120000),
+      signal: AbortSignal.timeout(
+        request.params.name === 'luma_request_merge_preview' ? 1800000 : 120000,
+      ),
       redirect: 'error',
     })
     const result = await response.json()
+    if (result.failure)
+      return {
+        isError: true,
+        content: [{ type: 'text', text: result.failure.message }],
+        structuredContent: result.failure,
+      }
     if (!response.ok || result.error) throw new Error(result.error ?? 'Editor request failed.')
     return {
       content: [{ type: 'text', text: JSON.stringify(result.result) }],

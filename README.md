@@ -4,7 +4,7 @@ A local desktop photo editor with an integrated agent console. The current miles
 
 The full product direction, including RAW processing, persistent edits, HDR, and agent-driven editing, is described in [Luma.md](Luma.md).
 
-The [natural rendering and full HDR roadmap](docs/features/README.md) contains planned implementation briefs, dependencies, and completion criteria for RAW brackets or HDR files → nondestructive HDR editing → HDR/SDR preview → HDR/SDR export. Merging, HDR file import and export remain **Planned**. The [experimental Sony RAW HDR pipeline](docs/hdr-processing.md) adds HDR/SDR presentation and domain-aware analysis, with physical luminance and non-Linux platforms unverified.
+The [natural rendering and full HDR roadmap](docs/features/README.md) contains planned implementation briefs, dependencies, and completion criteria for RAW brackets or HDR files → nondestructive HDR editing → HDR/SDR preview → HDR/SDR export. The bounded [Sony HDR merge and noise-stacking path](docs/merge-processing.md) remains experimental. The supplied handheld portrait pair/triple pass Auto Align, publication and native-detail checks; local 2/3/5/9-frame Sony noise stacks pass the 15-second cold publication gate. Controlled larger HDR brackets and 32-frame real RAW sequences remain unverified. HDR file import and export remain **Planned**. The [experimental Sony RAW HDR pipeline](docs/hdr-processing.md) adds HDR/SDR presentation and domain-aware analysis, with physical luminance and non-Linux platforms unverified.
 
 An [isolated HDR display diagnostic](docs/hdr-diagnostic.md) is available with `npm run hdr:diagnostic`. It uses a temporary profile and synthetic patches; it is separate from photograph processing. Linux has a hardware canvas candidate, while physical luminance and MacBook Pro M4 output remain unverified.
 
@@ -37,7 +37,7 @@ Development and test launches require a graphical desktop session on Linux. Inst
 3. Click **Import N photos**. The review closes immediately and originals copy in the background. Keep browsing while imported photos appear in the library; your current selection stays in place.
 4. The compact status-bar indicator shows transfer progress. Click it for the current filename, fixed photo and byte totals, errors, and **Cancel task**. Clicking Import again during a transfer also opens these details.
 
-One import or deletion runs at a time. Successful results disappear after five seconds; cancelled imports and failures remain until dismissed, including when another import starts. Reloading the window reconnects to the active task. Closing or quitting during a transfer asks whether to keep importing or cancel and quit. Tasks are not resumed after the application exits.
+One accepted import, deletion or merge publication runs at a time. Successful import/deletion results disappear after five seconds; merge results remain until dismissed; cancelled imports and failures remain until dismissed, including when another import starts. Reloading the window reconnects to the active task. Closing or quitting during a transfer asks whether to keep importing or cancel and quit. Tasks are not resumed after the application exits.
 
 JPEG, PNG, TIFF, and Sony ARW are supported. Sony ZV-1 12-bit compressed RAW is covered by a real camera fixture. Import review uses the RAW's embedded JPEG when available, otherwise LibRaw generates a quick SDR preview. Opening a photo also generates a full-resolution view from the internal original. RAW originals are preserved unchanged. Other camera/recording combinations require separate verification.
 
@@ -46,6 +46,10 @@ The managed library is stored in Electron's user-data directory, under `library/
 Cancel stops further work and preserves completed imports. Corrupt files, changed sources, unsupported formats, and write failures are shown individually. Interrupted staging files and unpublished original directories are cleaned at startup. RAW decoder inputs are limited to 512 MB; previews have a 90-second per-file timeout.
 
 Exposure, contrast, highlights, shadows, whites, blacks, and lens corrections share persistent edit history and Undo/Redo. Export, crop, additional light/color adjustments, HDR export, and agent execution remain future milestones; metadata comes from the imported file and missing fields display a dash. The console remains read-only.
+
+## Merge photographs
+
+Select 2–32 compatible Sony RAWs, then choose **Actions → Merge to HDR…** or **Stack for noise reduction…**. Both actions also appear in the photo context menu. Review alignment, reference choice, deghosting and shared-area crop, then choose **Merge**. The new editable master preserves its sources and appears through **Open result** in the task details. This is experimental; see [processing limits and verification gaps](docs/merge-processing.md).
 
 ## Select and delete photographs
 
@@ -96,23 +100,30 @@ Manual exposure/contrast/highlights/shadows/whites/blacks/lens editing and the d
 
 ## Commands
 
-| Command                  | Purpose                                                                     |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `npm run setup:electron` | Download the Electron runtime explicitly before the first launch            |
-| `npm run dev`            | Launch Electron with live renderer updates                                  |
-| `npm run build`          | Build main, preload, and renderer for production                            |
-| `npm start`              | Launch the previously built application                                     |
-| `npm run typecheck`      | Check TypeScript without rewriting source                                   |
-| `npm run lint`           | Check lint rules                                                            |
-| `npm run format:check`   | Check source and documentation formatting                                   |
-| `npm run test:e2e`       | Run the real Electron smoke and interaction tests                           |
-| `npm run check`          | Run type checks, lint, formatting checks, and fast Node tests               |
-| `npm run dev:mcp`        | Launch development Electron with local debugging enabled                    |
-| `npm run mcp:ui`         | Start the stdio Playwright MCP server for the running app                   |
-| `npm run mcp:test`       | Build and test photo import through MCP using an isolated temporary library |
-| `npm run mcp:check`      | Verify the MCP protocol, UI inspection, interaction, and screenshot capture |
+| Command                                        | Purpose                                                                     |
+| ---------------------------------------------- | --------------------------------------------------------------------------- |
+| `npm run setup:electron`                       | Download the Electron runtime explicitly before the first launch            |
+| `npm run dev`                                  | Launch Electron with live renderer updates                                  |
+| `npm run build`                                | Build main, preload, and renderer for production                            |
+| `npm start`                                    | Launch the previously built application                                     |
+| `npm run typecheck`                            | Check TypeScript without rewriting source                                   |
+| `npm run lint`                                 | Check lint rules                                                            |
+| `npm run format:check`                         | Check source and documentation formatting                                   |
+| `npm run test:e2e`                             | Run the real Electron smoke and interaction tests                           |
+| `npm run check`                                | Run type checks, lint, formatting checks, and fast Node tests               |
+| `npm run verify -- --target adjustment-wiring` | Cheap checks plus one explicit feature target                               |
+| `npm run check:full`                           | All functional tests and isolated MCP at an agreed checkpoint               |
+| `npm run check:all`                            | Functional tests, isolated MCP, and every benchmark family                  |
+| `npm run benchmark:preview`                    | Preview processing and Electron presentation only                           |
+| `npm run benchmark:hdr`                        | HDR edit and selection latency                                              |
+| `npm run benchmark:merge`                      | Isolated merge worker runtime, memory, and scratch measurements             |
+| `npm run benchmark:all`                        | Every benchmark family, including all named adjustments                     |
+| `npm run dev:mcp`                              | Launch development Electron with local debugging enabled                    |
+| `npm run mcp:ui`                               | Start the stdio Playwright MCP server for the running app                   |
+| `npm run mcp:test`                             | Build and test photo import through MCP using an isolated temporary library |
+| `npm run mcp:check`                            | Verify the MCP protocol, UI inspection, interaction, and screenshot capture |
 
-Use `npm run verify -- <scope>` for focused verification (`ui`, `adjustments`, `preview`, `library`, or `mcp`); combine scopes or preview them with `npm run verify -- --plan ui preview`. Run `npm run check:full` at milestone completion. Run benchmarks at milestones or during performance work; `npm run benchmark:adjustments -- highlights` measures just one adjustment. Every invocation preserves logs and reports in a separate ignored artifact directory. See the [verification workflow](docs/testing.md#choose-verification) for failure reruns and diagnostic tracing.
+Use `npm run verify -- --target <id>` for routine feature verification; repeat `--target` to combine IDs from the suite registry. Broad scopes (`ui`, `adjustments`, `preview`, `library`, `mcp`) remain available for deliberate regression checks. Add `--plan` to preview selection without artifacts. Comprehensive commands require a user-requested or previously agreed checkpoint; completing a feature alone never triggers one. `benchmark:preview` deliberately covers preview measurements only; `benchmark:all` and `check:all` retain all existing performance gates. Supply a saved `LUMA_PREVIEW_BASELINE` to enforce the 15% uncorrected-preview limit. Every invocation preserves `summary.md`, structured results, and detailed evidence in a separate ignored artifact directory. Read the compact report first. See the [verification workflow](docs/testing.md#choose-verification) for budgets, failure reruns, locking, and diagnostic tracing.
 
 For step-by-step module registration, examples, and verification, see [Adding lens corrections and image processors](src/main/processing/README.md). The [RAW processing overview](docs/raw-processing.md) covers pipeline contracts and measured results.
 

@@ -11,9 +11,13 @@ import type { CorrectionPlan } from '../processing/lens-correction'
 import { ahdShader } from './ahd-shader'
 import { displayCurve, displayTransform, type RawSource } from './raw-source'
 import { frameByteLength } from '../../shared/preview-frame'
+import { mergePrepareShader } from './merge-prepare-shader'
+import { mergePreparationParameters } from './merge-parameters'
 
 export const GPU_RENDER_ID = 'bayer-ahd-srgb-gpu-2'
 export interface GpuFrame {
+  mergeReduced?: Float32Array
+  gpuBytes?: number
   hdrPrepared?: boolean
   working?: WorkingFrame
   data: Buffer
@@ -21,6 +25,19 @@ export interface GpuFrame {
   height: number
   adapter: string
   timings: Record<string, number>
+}
+export interface GpuMergePreparation {
+  gains: number[]
+  reviewWidth: number
+  reviewHeight: number
+  checkpoint: () => Promise<void>
+  // The buffer is borrowed until the returned promise settles; retained data must be copied.
+  strip: (top: number, bytes: Buffer) => Promise<void>
+}
+export interface GpuCameraConsumer {
+  reservedBytes: number
+  checkpoint: () => Promise<void>
+  consume: (linear: GPUTexture, device: GPUDevice) => Promise<void>
 }
 
 /** Native Dawn only lives in the bundled Node worker, never Electron's address space. */
@@ -54,7 +71,13 @@ export class RawGpuRenderer {
       throw new Error('No hardware GPU adapter is available.')
     this.adapter = `${adapter.info.vendor} ${adapter.info.device} (${adapter.info.description})`
     const device = await adapter.requestDevice({
-      requiredLimits: { maxBufferSize: Math.min(1024 ** 3, adapter.limits.maxBufferSize) },
+      requiredLimits: {
+        maxBufferSize: Math.min(1024 ** 3, adapter.limits.maxBufferSize),
+        maxStorageBufferBindingSize: Math.min(
+          1024 ** 3,
+          adapter.limits.maxStorageBufferBindingSize,
+        ),
+      },
     })
     this.device = device
     void device.lost.then((info) => {
@@ -94,6 +117,11 @@ export class RawGpuRenderer {
     return device
   }
 
+  async mergeDevice(): Promise<{ device: GPUDevice; adapter: string }> {
+    const device = await this.initialize()
+    return { device, adapter: this.adapter }
+  }
+
   releaseFrame(): void {
     this.linear?.destroy()
     this.linear = undefined
@@ -114,6 +142,8 @@ export class RawGpuRenderer {
     adjustments: AdjustmentParameters = neutralAdjustments,
     exportLinear = false,
     cameraOnly = false,
+    merge?: GpuMergePreparation,
+    consumer?: GpuCameraConsumer,
   ): Promise<GpuFrame> {
     const start = performance.now()
     const device = await this.initialize().catch((error) => {
@@ -124,13 +154,15 @@ export class RawGpuRenderer {
     const timings: Record<string, number> = { initializeMs: performance.now() - start }
     const { width, height } = source
     const bytes = frameByteLength(width, height)
-    const rows = 256,
+    const rows = consumer ? 128 : 256,
       stripePixels = width * (rows + 12)
-    const estimatedBytes = Math.max(
-      bytes * 6 + source.pixels.byteLength + stripePixels * 80,
-      correction ? bytes * 9 + source.pixels.byteLength : 0,
-      exportLinear ? bytes * 12 + height * 256 : 0,
-    )
+    const estimatedBytes = consumer
+      ? bytes * 4 + source.pixels.byteLength + stripePixels * 80 + 623072 + consumer.reservedBytes
+      : Math.max(
+          bytes * 6 + source.pixels.byteLength + stripePixels * 80,
+          correction ? bytes * 9 + source.pixels.byteLength : 0,
+          exportLinear ? bytes * 12 + height * 256 : 0,
+        )
     if (
       estimatedBytes > 1024 ** 3 ||
       bytes * 4 > device.limits.maxBufferSize ||
@@ -161,7 +193,7 @@ export class RawGpuRenderer {
       const lab = makeBuffer(stripePixels * 32, storage)
       const homo = makeBuffer(stripePixels * 8, storage)
       const histogram = makeBuffer(3 * 8192 * 4, storage | GPUBufferUsage.COPY_SRC)
-      const output = makeBuffer(bytes, storage | GPUBufferUsage.COPY_SRC)
+      const output = makeBuffer(consumer ? 4 : bytes, storage | GPUBufferUsage.COPY_SRC)
       const curve = makeBuffer(65536 * 4, storage)
       const cbrt = new Float32Array(65536)
       for (let i = 0; i < cbrt.length; i++) {
@@ -230,7 +262,7 @@ export class RawGpuRenderer {
             )
           floats[28 + r * 4 + c] = sum
         }
-      floats[31] = correction || cameraOnly ? 1 : 0
+      floats[31] = correction || cameraOnly || merge || consumer ? 1 : 0
       floats[35] = source.normalization?.restoreGain ?? 1
       floats[40] = adjustments.exposureEv
       floats[41] = adjustments.contrast
@@ -253,6 +285,7 @@ export class RawGpuRenderer {
       const processing = performance.now()
       device.queue.writeBuffer(uniform, 0, params)
       for (let top = 0; !reuse && top < height; top += rows) {
+        if (consumer) await consumer.checkpoint()
         const count = Math.min(rows, height - top)
         ints[6] = top
         ints[7] = count
@@ -276,6 +309,162 @@ export class RawGpuRenderer {
       }
       this.cameraSource = source
       this.correctedMode = !!correction
+      if (consumer) {
+        await device.queue.onSubmittedWorkDone()
+        // The consumer reserves its live allocations in the shared 1 GiB budget.
+        for (const resource of resources) resource.destroy()
+        await consumer.checkpoint()
+        await consumer.consume(linear, device)
+        await device.queue.onSubmittedWorkDone()
+        const oom = await device.popErrorScope(),
+          validation = await device.popErrorScope()
+        if (oom || validation) throw new Error((oom ?? validation)!.message)
+        timings.processingMs = performance.now() - processing
+        this.releaseFrame()
+        return {
+          data: Buffer.alloc(0),
+          width,
+          height,
+          adapter: this.adapter,
+          timings,
+          gpuBytes: estimatedBytes,
+        }
+      }
+      if (merge && correction && source.normalization?.sourceSaturation) {
+        await device.queue.onSubmittedWorkDone()
+        for (const resource of [green, rgb, lab, homo, labCurve, output, curve, histogram])
+          resource.destroy()
+        const nativeWidth = source.flip & 4 ? correction.height : correction.width,
+          nativeHeight = source.flip & 4 ? correction.width : correction.height
+        const prepared = device.createTexture({
+          size: [nativeWidth, nativeHeight],
+          format: 'rgba32float',
+          usage:
+            GPUTextureUsage.STORAGE_BINDING |
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.COPY_SRC,
+        })
+        try {
+          if (!this.pipelines.has('merge-prepare')) {
+            const module = device.createShaderModule({ code: mergePrepareShader })
+            const errors = (await module.getCompilationInfo()).messages.filter(
+              (m) => m.type === 'error',
+            )
+            if (errors.length) throw new Error(errors.map((m) => m.message).join('\n'))
+            for (const name of ['saturation', 'prepare', 'reduce'])
+              this.pipelines.set(
+                `merge-${name}`,
+                await device.createComputePipelineAsync({
+                  layout: 'auto',
+                  compute: { module, entryPoint: name },
+                }),
+              )
+          }
+          const parameters = mergePreparationParameters(
+            source,
+            correction,
+            merge.gains,
+            merge.reviewWidth,
+            merge.reviewHeight,
+          )
+          const uniform = makeBuffer(
+              144,
+              GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+              new Uint8Array(parameters),
+            ),
+            saturation = makeBuffer(width * height * 4, storage),
+            lut = makeBuffer(correction.lut.byteLength, storage, correction.lut),
+            reduced = makeBuffer(
+              merge.reviewWidth * merge.reviewHeight * 32,
+              storage | GPUBufferUsage.COPY_SRC,
+            )
+          const bindings: Record<number, GPUBindingResource> = {
+            0: { buffer: uniform },
+            1: { buffer: raw },
+            2: { buffer: saturation },
+            3: linear.createView(),
+            4: prepared.createView(),
+            5: { buffer: lut },
+            6: prepared.createView(),
+            7: { buffer: reduced },
+          }
+          for (const [name, indices, w, h] of [
+            ['saturation', [0, 1, 2], width, height],
+            ['prepare', [0, 2, 3, 4, 5], nativeWidth, nativeHeight],
+            ['reduce', [0, 6, 7], merge.reviewWidth, merge.reviewHeight],
+          ] as const) {
+            const pipeline = this.pipelines.get(`merge-${name}`)!,
+              group = device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(0),
+                entries: indices.map((binding) => ({ binding, resource: bindings[binding] })),
+              }),
+              encoder = device.createCommandEncoder(),
+              pass = encoder.beginComputePass()
+            pass.setPipeline(pipeline)
+            pass.setBindGroup(0, group)
+            pass.dispatchWorkgroups(
+              Math.ceil(w / (name === 'reduce' ? 8 : 16)),
+              Math.ceil(h / (name === 'reduce' ? 8 : 16)),
+            )
+            pass.end()
+            device.queue.submit([encoder.finish()])
+          }
+          const mergeReduced = new Float32Array(await readBuffer(reduced, reduced.size))
+          this.releaseFrame()
+          const rowBytes = Math.ceil((nativeWidth * 16) / 256) * 256
+          const staging = makeBuffer(
+            rowBytes * 256,
+            GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          )
+          const bytes = Buffer.allocUnsafe(nativeWidth * 256 * 16)
+          for (let top = 0; top < nativeHeight; top += 256) {
+            await merge.checkpoint()
+            const count = Math.min(256, nativeHeight - top),
+              encoder = device.createCommandEncoder()
+            encoder.copyTextureToBuffer(
+              { texture: prepared, origin: [0, top] },
+              { buffer: staging, bytesPerRow: rowBytes },
+              [nativeWidth, count],
+            )
+            device.queue.submit([encoder.finish()])
+            await staging.mapAsync(GPUMapMode.READ)
+            const mapped = Buffer.from(staging.getMappedRange())
+            for (let row = 0; row < count; row++)
+              mapped.copy(
+                bytes,
+                row * nativeWidth * 16,
+                row * rowBytes,
+                row * rowBytes + nativeWidth * 16,
+              )
+            await merge.strip(top, bytes.subarray(0, nativeWidth * count * 16))
+            staging.unmap()
+          }
+          const oom = await device.popErrorScope(),
+            validation = await device.popErrorScope()
+          if (oom || validation) throw new Error((oom ?? validation)!.message)
+          timings.processingMs = performance.now() - processing
+          return {
+            data: Buffer.alloc(0),
+            width: nativeWidth,
+            height: nativeHeight,
+            adapter: this.adapter,
+            timings,
+            mergeReduced,
+            gpuBytes: Math.max(
+              estimatedBytes,
+              width * height * 20 +
+                nativeWidth * nativeHeight * 16 +
+                raw.size +
+                rowBytes * 256 +
+                reduced.size +
+                uniform.size +
+                lut.size,
+            ),
+          }
+        } finally {
+          prepared.destroy()
+        }
+      }
       if (cameraOnly) {
         await device.queue.onSubmittedWorkDone()
         for (const resource of resources) resource.destroy()

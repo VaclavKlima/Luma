@@ -67,6 +67,14 @@ test('starts the built desktop application with its isolated preload bridge', as
   expect(bridge).toEqual({
     info: { version: nativeInfo.version, platform: nativeInfo.platform },
     keys: [
+      'getActiveMergeReview',
+      'getMergeDiagnostics',
+      'createMergeReview',
+      'updateMergeReview',
+      'requestMergePreview',
+      'startMerge',
+      'disposeMergeReview',
+      'getMergeProvenance',
       'getPreviewDiagnostics',
       'reportPreviewPresentation',
       'getDisplayState',

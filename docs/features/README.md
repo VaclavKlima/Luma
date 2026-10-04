@@ -10,28 +10,42 @@ The [root README](../../README.md) describes the running application. It imports
 
 Legacy processing retains RGBA8 sRGB output. The separate experimental HDR path uses Float32 Rec.2020 working data and HDR/SDR output targets. Current support for a container such as JPEG or TIFF does not establish HDR decoding, gain-map support, or HDR export. Sony ZV-1 compressed ARW has a real fixture; additional cameras and recording modes require their own verification. Existing Linux results do not establish Windows/macOS support.
 
+## Workspace feedback backlog
+
+Open tasks from user feedback. Numbers preserve the reported order; the Delete issue still needs reproduction.
+
+- [ ] **1. Bug — Delete key does nothing with a photo selected.** Reproduce and fix the shortcut so it opens the existing deletion confirmation for the selected photos. Preserve text-field and console keyboard behavior, pending range selection, and system Trash handling.
+- [ ] **2. Improvement — Zoom and pan in Merge to HDR review.** Support pointer-centered wheel zoom, dragging, Fit, 100%, and scoped keyboard controls consistently with the normal preview. Use the review image's actual dimensions when showing its zoom percentage.
+- [ ] **3. Improvement — Collapse merge sources behind the result.** Show the merged photo as the cover of a stack, with an accessible icon and source count to expand or collapse its originals. Keep originals available for individual browsing and editing, and retain the grouping across restarts. Collapsing sources never deletes them.
+- [ ] **4. Feasibility — Automatically group a capture sequence.** Investigate reliable camera metadata for photographs taken during one continuous-shutter or BRK sequence. Reuse the expandable stack from item 3; allow manual grouping and ungrouping when sequence identity is missing or ambiguous. Grouping does not automatically merge photos.
+- [ ] **5. UI cleanup — Remove Inspect center pixel.** Remove the button from the regular preview toolbar; retain useful pixel inspection through the agent/MCP API.
+- [ ] **6. UI cleanup — Remove technical analysis details below the histogram.** Keep the histogram and useful clipping controls visible; retain detailed statistics through the agent/MCP API.
+- [ ] **7. UI cleanup — Move Lens corrections lower in the inspector.** Place the section below the main editing controls and collapse it by default. Keep automatic corrections and existing per-photo overrides available.
+- [ ] **8. Improvement — Show compact metadata in the preview toolbar.** Use the space freed by item 5 for useful available metadata, such as camera, lens, shutter speed, aperture, and ISO. Keep it readable at 1100 × 700 with the console open, and avoid inventing a single exposure for merged photos.
+
 ## Implementation order and dependencies
 
 The briefs describe the complete destination; experimental subsets do not imply completion of every acceptance criterion. The prerequisites below are also repeated in each brief. A display feasibility spike uses synthetic float patterns before a production HDR pipeline exists; final display acceptance follows the processing and tone-mapping foundations. This separation avoids a circular dependency.
 
-| Stage | Brief                                             | Required foundation and deliverable                                                                                                          |
-| ----- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | [HDR display](hdr-display.md)                     | First prove or rule out the Electron presentation path on actual HDR hardware; record platform limitations.                                  |
-| 1     | [HDR processing](hdr-processing.md)               | Use feasibility findings to define a versioned float master, color/brightness contracts, bounded scheduling, and legacy compatibility.       |
-| 2     | [Camera color profiles](camera-color-profiles.md) | Processing contract; verified characterization and neutral rendering for supported cameras.                                                  |
-| 2     | [Tone mapping](tone-mapping.md)                   | Processing and characterized color inputs; separate controlled SDR and HDR display transforms. Complete production display integration here. |
-| 3     | [HDR analysis](hdr-analysis.md)                   | Processing, tone mapping, and display target descriptors; distinguish scene, display, and source clipping.                                   |
-| 3     | [White balance picker](white-balance-picker.md)   | Processing, camera profiles, and existing white-balance/history service.                                                                     |
-| 3     | [Vibrance and saturation](vibrance-saturation.md) | Processing, camera profiles, and tone mapping.                                                                                               |
-| 3     | [Tone curves](tone-curves.md)                     | Processing and tone mapping; coordinate semantics must cover HDR values.                                                                     |
-| 3     | [Color mixer](color-mixer.md)                     | Processing, tone mapping, and the color model validated for vibrance/saturation.                                                             |
-| 3     | [Noise reduction](noise-reduction.md)             | Processing and camera/noise characterization; synthetic merge-like inputs suffice before merge integration.                                  |
-| 3     | [Sharpening](sharpening.md)                       | Processing, tone mapping, and noise-reduction stage contract; output branch completed with export.                                           |
-| 3     | [Local adjustments](local-adjustments.md)         | Processing and global operators; reuse color controls where offered and gate other local operations until supported.                         |
-| 4     | [HDR merge](hdr-merge.md)                         | Processing, camera profiles, tone mapping, and existing library/task services; integrate analysis and detail processing.                     |
-| 5     | [HDR file support](hdr-file-support.md)           | Processing and tone mapping; validate format adapters independently of display hardware.                                                     |
-| 5     | [Export](export.md)                               | Processing, tone mapping, file-format decisions, output sharpening, and completed edit operators; validate merged and imported assets.       |
-| 5     | Final platform verification                       | Re-run display, analysis, file interoperability, export, and complete workflow acceptance on Linux, Windows, and macOS.                      |
+| Stage | Brief                                                  | Required foundation and deliverable                                                                                                          |
+| ----- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | [HDR display](hdr-display.md)                          | First prove or rule out the Electron presentation path on actual HDR hardware; record platform limitations.                                  |
+| 1     | [HDR processing](hdr-processing.md)                    | Use feasibility findings to define a versioned float master, color/brightness contracts, bounded scheduling, and legacy compatibility.       |
+| 2     | [Bounded Sony HDR/noise merge](../merge-processing.md) | Existing experimental Sony HDR pipeline; permanent masters, shared review and tasks before broader camera-profile work.                      |
+| 2     | [Camera color profiles](camera-color-profiles.md)      | Processing contract; verified characterization and neutral rendering for supported cameras.                                                  |
+| 2     | [Tone mapping](tone-mapping.md)                        | Processing and characterized color inputs; separate controlled SDR and HDR display transforms. Complete production display integration here. |
+| 3     | [HDR analysis](hdr-analysis.md)                        | Processing, tone mapping, and display target descriptors; distinguish scene, display, and source clipping.                                   |
+| 3     | [White balance picker](white-balance-picker.md)        | Processing, camera profiles, and existing white-balance/history service.                                                                     |
+| 3     | [Vibrance and saturation](vibrance-saturation.md)      | Processing, camera profiles, and tone mapping.                                                                                               |
+| 3     | [Tone curves](tone-curves.md)                          | Processing and tone mapping; coordinate semantics must cover HDR values.                                                                     |
+| 3     | [Color mixer](color-mixer.md)                          | Processing, tone mapping, and the color model validated for vibrance/saturation.                                                             |
+| 3     | [Noise reduction](noise-reduction.md)                  | Processing and camera/noise characterization; synthetic merge-like inputs suffice before merge integration.                                  |
+| 3     | [Sharpening](sharpening.md)                            | Processing, tone mapping, and noise-reduction stage contract; output branch completed with export.                                           |
+| 3     | [Local adjustments](local-adjustments.md)              | Processing and global operators; reuse color controls where offered and gate other local operations until supported.                         |
+| 4     | [HDR merge](hdr-merge.md)                              | Processing, camera profiles, tone mapping, and existing library/task services; integrate analysis and detail processing.                     |
+| 5     | [HDR file support](hdr-file-support.md)                | Processing and tone mapping; validate format adapters independently of display hardware.                                                     |
+| 5     | [Export](export.md)                                    | Processing, tone mapping, file-format decisions, output sharpening, and completed edit operators; validate merged and imported assets.       |
+| 5     | Final platform verification                            | Re-run display, analysis, file interoperability, export, and complete workflow acceptance on Linux, Windows, and macOS.                      |
 
 Format and licensing research may begin early. These stages order production integration, not every experiment. No user-facing control becomes available merely because its brief exists. General crop/straighten, automatic masks, terminal execution, and cloud features remain outside these briefs; merge's valid-area crop is included.
 

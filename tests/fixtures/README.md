@@ -16,3 +16,7 @@ The fixture is committed so tests run offline. Embedded extraction is deliberate
 ## JPEG fixtures
 
 The photographs in `photos/` were moved from the original visual scaffold. See [their retained credits](photos/CREDITS.md) for photographers, sources, and licenses.
+
+## HDR+ engine fixtures
+
+Three original mobile-camera DNG frames and their attribution are in [hdrplus](hdrplus/README.md). They are licensed CC BY-SA 4.0 and remain separate from supported Sony RAW acceptance.

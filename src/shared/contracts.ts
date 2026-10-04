@@ -12,6 +12,28 @@ export interface AppInfo {
 }
 
 export interface LumaApi {
+  getActiveMergeReview(): Promise<import('./merge').MergeReview | null>
+  getMergeDiagnostics(id: string, revision: number): Promise<import('./merge').MergeDiagnostics>
+  createMergeReview(
+    ids: string[],
+    mode: import('./merge').MergeMode,
+  ): Promise<import('./merge').MergeReview>
+  updateMergeReview(
+    id: string,
+    revision: number,
+    settings: import('./merge').MergeSettings,
+  ): Promise<import('./merge').MergeReview>
+  requestMergePreview(
+    id: string,
+    revision: number,
+    detail?: boolean,
+  ): Promise<import('./merge').MergePreview>
+  startMerge(id: string, revision: number): Promise<string>
+  disposeMergeReview(id: string): Promise<void>
+  getMergeProvenance(
+    photoId: string,
+  ): Promise<{ manifest: import('./merge').MergeManifest; reproducible: boolean }>
+
   getPreviewDiagnostics(): Promise<import('./preview-diagnostics').PreviewDiagnostics>
   reportPreviewPresentation(
     value: import('./preview-diagnostics').PreviewPresentation,
@@ -76,6 +98,7 @@ export interface PhotoMetadata {
 }
 
 export interface Photo extends PhotoMetadata {
+  assetKind?: 'original' | 'derived'
   id: string
   filename: string
   format: string
@@ -129,7 +152,10 @@ export interface PhotoLocation extends PhotoPage {
 }
 
 export interface BackgroundTask {
-  kind: 'import' | 'delete'
+  mergeMeasurements?: import('./merge').MergeMeasurements
+  kind: 'import' | 'delete' | 'merge'
+  phase?: string
+  resultPhotoId?: string
   id: string
   title: string
   status: 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed'

@@ -1,7 +1,24 @@
+import { MergeError, type MergeFailure } from '../shared/merge'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AppInfo, LibraryEvent, LumaApi } from '../shared/contracts'
 
+async function mergeResult<T>(response: Promise<{ result: T; error?: MergeFailure }>): Promise<T> {
+  const value = await response
+  if (value.error) throw new MergeError(value.error)
+  return value.result
+}
 const api: LumaApi = {
+  getActiveMergeReview: () => mergeResult(ipcRenderer.invoke('merge:active')),
+  getMergeDiagnostics: (id, revision) =>
+    mergeResult(ipcRenderer.invoke('merge:diagnostics', id, revision)),
+  createMergeReview: (ids, mode) => mergeResult(ipcRenderer.invoke('merge:create', ids, mode)),
+  updateMergeReview: (id, revision, settings) =>
+    mergeResult(ipcRenderer.invoke('merge:update', id, revision, settings)),
+  requestMergePreview: (id, revision, detail = false) =>
+    mergeResult(ipcRenderer.invoke('merge:preview', id, revision, detail)),
+  startMerge: (id, revision) => mergeResult(ipcRenderer.invoke('merge:start', id, revision)),
+  disposeMergeReview: (id) => mergeResult(ipcRenderer.invoke('merge:dispose', id)),
+  getMergeProvenance: (id) => mergeResult(ipcRenderer.invoke('merge:provenance', id)),
   getPreviewDiagnostics: () => ipcRenderer.invoke('preview:diagnostics'),
   reportPreviewPresentation: (value) => ipcRenderer.invoke('preview:presentation', value),
   getDisplayState: () => ipcRenderer.invoke('display:get'),
