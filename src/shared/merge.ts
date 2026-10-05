@@ -228,9 +228,6 @@ export interface MergePreview {
   resultUrl: string
   referenceUrl: string
   overlayUrl: string
-  nativeResultUrl: string
-  nativeReferenceUrl: string
-  nativeOverlayUrl: string
   width: number
   height: number
   recipe: MergeRecipe

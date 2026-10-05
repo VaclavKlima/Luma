@@ -92,8 +92,6 @@ export async function loadPreparation(
         !p.plane.mask.every((v) => v === 0 || v === 255)))
   )
     throw new Error('Invalid source preparation.')
-  if (p.review && p.review.path !== join(directory, `source-${index}-review.f32`))
-    throw new Error('Invalid review preparation.')
   if (p.sensor) await validateSensorCache(p.sensor, directory, index, p.width, p.height)
   return p
 }

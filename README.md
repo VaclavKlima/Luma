@@ -49,7 +49,7 @@ Exposure, contrast, highlights, shadows, whites, blacks, and lens corrections sh
 
 ## Merge photographs
 
-Select 2–32 compatible Sony RAWs, then choose **Actions → Merge to HDR…** or **Stack for noise reduction…**. Both actions also appear in the photo context menu. Review alignment, reference choice, deghosting and shared-area crop, then choose **Merge**. The new editable master preserves its sources and appears through **Open result** in the task details. This is experimental; see [processing limits and verification gaps](docs/merge-processing.md).
+Select 2–32 compatible Sony RAWs, then choose **Actions → Merge to HDR…** or **Stack for noise reduction…**. Both actions also appear in the photo context menu. The review opens at Fit with native detail already prepared. Scroll to zoom around the pointer, drag to pan, or use the zoom toolbar for Fit and 100%. With the image focused, use **+ / −**, **0**, **1**, and arrow keys; Shift pans farther. Zoom and framing survive settings and reference changes. Review alignment, reference choice, deghosting and shared-area crop, then choose **Merge**. The new editable master preserves its sources and appears through **Open result** in the task details. This is experimental; see [processing limits and verification gaps](docs/merge-processing.md).
 
 ## Select and delete photographs
 

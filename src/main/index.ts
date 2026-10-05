@@ -306,9 +306,9 @@ app
       trusted(event)
       return mergeReply(() => library!.updateMergeReview(id, revision, settings))
     })
-    ipcMain.handle('merge:preview', (event, id, revision, detail) => {
+    ipcMain.handle('merge:preview', (event, id, revision) => {
       trusted(event)
-      return mergeReply(() => library!.requestMergePreview(id, revision, detail))
+      return mergeReply(() => library!.requestMergePreview(id, revision))
     })
     ipcMain.handle('merge:start', (event, id, revision) => {
       trusted(event)

@@ -154,7 +154,7 @@ for (const count of [2, 3, 5, 9])
           })
           .toBeTruthy()
         const task = library.listTasks().find((t) => t.id === taskId)!,
-          nativeAndPublicationMs = task.finishedAt! - publicationStart
+          publicationMs = task.finishedAt! - publicationStart
         expect(task.status, JSON.stringify(library.taskErrors(taskId))).toBe('completed')
         const measurements = task.mergeMeasurements!
         expect(measurements.accumulation.backend, JSON.stringify(measurements)).toBe('gpu')
@@ -163,9 +163,9 @@ for (const count of [2, 3, 5, 9])
         )
         samples.push({
           iteration,
-          coldRunMs: preparedMs + nativeAndPublicationMs,
-          preparedMs,
-          nativeAndPublicationMs,
+          coldRunMs: preparedMs + publicationMs,
+          nativeReviewMs: preparedMs,
+          publicationMs,
           preparationReuseMs,
           width: preview.recipe.width,
           height: preview.recipe.height,
@@ -316,8 +316,8 @@ for (const count of [2, 3, 5, 9])
         samples.push({
           iteration,
           coldRunMs: task.finishedAt! - start,
-          preparedMs: publicationStart - start,
-          nativeAndPublicationMs: task.finishedAt! - publicationStart,
+          nativeReviewMs: publicationStart - start,
+          publicationMs: task.finishedAt! - publicationStart,
           width: preview.recipe.width,
           height: preview.recipe.height,
           cold: cold.measurements,

@@ -23,11 +23,7 @@ export interface LumaApi {
     revision: number,
     settings: import('./merge').MergeSettings,
   ): Promise<import('./merge').MergeReview>
-  requestMergePreview(
-    id: string,
-    revision: number,
-    detail?: boolean,
-  ): Promise<import('./merge').MergePreview>
+  requestMergePreview(id: string, revision: number): Promise<import('./merge').MergePreview>
   startMerge(id: string, revision: number): Promise<string>
   disposeMergeReview(id: string): Promise<void>
   getMergeProvenance(

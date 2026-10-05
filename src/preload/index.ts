@@ -14,8 +14,8 @@ const api: LumaApi = {
   createMergeReview: (ids, mode) => mergeResult(ipcRenderer.invoke('merge:create', ids, mode)),
   updateMergeReview: (id, revision, settings) =>
     mergeResult(ipcRenderer.invoke('merge:update', id, revision, settings)),
-  requestMergePreview: (id, revision, detail = false) =>
-    mergeResult(ipcRenderer.invoke('merge:preview', id, revision, detail)),
+  requestMergePreview: (id, revision) =>
+    mergeResult(ipcRenderer.invoke('merge:preview', id, revision)),
   startMerge: (id, revision) => mergeResult(ipcRenderer.invoke('merge:start', id, revision)),
   disposeMergeReview: (id) => mergeResult(ipcRenderer.invoke('merge:dispose', id)),
   getMergeProvenance: (id) => mergeResult(ipcRenderer.invoke('merge:provenance', id)),

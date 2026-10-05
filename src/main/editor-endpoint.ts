@@ -45,7 +45,6 @@ export async function startEditorEndpoint(
         ids,
         mode,
         reviewId,
-        detail,
         settings,
         taskId,
         photoId,
@@ -64,7 +63,6 @@ export async function startEditorEndpoint(
         ids: string[]
         mode: import('../shared/merge').MergeMode
         reviewId: string
-        detail?: boolean
         settings: import('../shared/merge').MergeSettings
         taskId: string
         operation: string
@@ -88,7 +86,7 @@ export async function startEditorEndpoint(
           result = await library.updateMergeReview(reviewId, expectedRevision, settings)
           break
         case 'luma_request_merge_preview':
-          result = await library.requestMergePreview(reviewId, expectedRevision, detail)
+          result = await library.requestMergePreview(reviewId, expectedRevision)
           break
         case 'luma_start_merge':
           result = { taskId: library.startMerge(reviewId, expectedRevision) }

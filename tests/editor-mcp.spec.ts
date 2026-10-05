@@ -18,6 +18,14 @@ test('stdio editing tools share persisted history with UI without a development 
   const client = new Client({ name: 'luma-editor-test', version: '1' })
   try {
     await client.connect(transport)
+    const previewTool = (await client.listTools()).tools.find(
+      (tool) => tool.name === 'luma_request_merge_preview',
+    )!
+    expect(Object.keys(previewTool.inputSchema.properties!)).toEqual([
+      'reviewId',
+      'expectedRevision',
+    ])
+    expect(previewTool.inputSchema.required).toEqual(['reviewId', 'expectedRevision'])
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
       'luma_get_active_merge_review',
       'luma_get_merge_diagnostics',

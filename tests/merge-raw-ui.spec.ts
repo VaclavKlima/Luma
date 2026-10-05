@@ -2,7 +2,9 @@ import { test, expect } from './electron.fixture'
 import { importPhotos } from './import.helpers'
 import { isolateTrash } from './photo-actions.helpers'
 import { cp } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 test.use({ hdrImports: true })
 test('supplied Sony brackets review, publish, open and survive source deletion through the UI', async ({
@@ -55,8 +57,36 @@ test('supplied Sony brackets review, publish, open and survive source deletion t
     }
     throw error
   }
-  await expect(page.getByRole('dialog')).toContainText('Reduced preview')
+  const viewport = page.getByTestId('merge-viewport')
+  await expect(viewport).toHaveAttribute('data-ready', 'true')
+  await expect(page.getByRole('button', { name: 'Native detail (100%)' })).toHaveCount(0)
   const readyReview = await page.evaluate(() => window.luma.getActiveMergeReview())
+  const client = new Client({ name: 'native-merge-review-test', version: '1' }),
+    transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve('scripts/editor-mcp.mjs')],
+      env: { ...(process.env as Record<string, string>), LUMA_PROFILE: luma.userDataDir },
+    })
+  try {
+    await client.connect(transport)
+    const response = await client.callTool({
+      name: 'luma_request_merge_preview',
+      arguments: { reviewId: readyReview!.id, expectedRevision: readyReview!.revision },
+    })
+    expect(response.isError).not.toBe(true)
+    const nativePreview =
+      response.structuredContent as unknown as import('../src/shared/merge').MergePreview
+    expect(nativePreview.recipe.resolution).toBe('native')
+    expect(nativePreview.width).toBe(nativePreview.recipe.crop.width)
+    expect(nativePreview.height).toBe(nativePreview.recipe.crop.height)
+    expect(nativePreview.resultUrl).toMatch(/\/result$/)
+    expect(nativePreview.referenceUrl).toMatch(/\/reference$/)
+    expect(nativePreview.overlayUrl).toMatch(/\/overlay$/)
+    expect(nativePreview).not.toHaveProperty('nativeResultUrl')
+  } finally {
+    await client.close()
+    await transport.close()
+  }
   await info.attach('alignment-diagnostics', {
     body: JSON.stringify(
       await page.evaluate((r) => window.luma.getMergeDiagnostics(r!.id, r!.revision), readyReview),
@@ -75,13 +105,27 @@ test('supplied Sony brackets review, publish, open and survive source deletion t
   )
   await expect(merge).toBeEnabled()
   await page.screenshot({ path: info.outputPath('merge-review-1100x700.png') })
-  if (process.env.LUMA_MERGE_SKIP_DETAIL !== '1') {
-    await page.getByRole('button', { name: 'Native detail (100%)' }).click()
-    await expect(
-      page.getByRole('dialog').getByRole('button', { name: 'Fit preview', exact: true }),
-    ).toBeVisible({ timeout: 100000 })
-    await expect(merge).toBeEnabled()
-  }
+  await page.getByRole('combobox', { name: 'Merge preview zoom' }).selectOption('1')
+  await expect(viewport).toHaveAttribute('data-scale', '1')
+  const dimensions = await page.getByAltText('Merged result', { exact: true }).evaluate((image) => {
+    const img = image as HTMLImageElement,
+      box = img.getBoundingClientRect()
+    return {
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+      displayedWidth: box.width,
+      displayedHeight: box.height,
+    }
+  })
+  expect(dimensions.width).toBeGreaterThan(1024)
+  expect(dimensions.displayedWidth).toBe(dimensions.width)
+  expect(dimensions.displayedHeight).toBe(dimensions.height)
+  await page.getByRole('button', { name: 'Show prepared reference' }).click()
+  await expect(viewport).toHaveAttribute('data-scale', '1')
+  await expect(page.getByAltText('Prepared reference')).toBeVisible()
+  await page.getByRole('button', { name: 'Show merged result' }).click()
+  await page.getByRole('button', { name: 'Fit merge preview' }).click()
+  await expect(viewport).toHaveAttribute('data-fit', 'true')
   await merge.click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page.getByTestId('selection-count')).toHaveText(`${paths.length} selected`)

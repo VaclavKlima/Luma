@@ -20,6 +20,7 @@ export async function syntheticMerge(
     height?: number
     reference?: number
     worker?: boolean
+    comparisons?: boolean
     edge?: boolean
     isoVariation?: boolean
     autoAlign?: boolean
@@ -213,6 +214,7 @@ export async function syntheticMerge(
     const job = {
       directory,
       output,
+      comparisons: options.comparisons,
       paths: sources.map((s) => s.photo.filename),
       sources,
       settings,

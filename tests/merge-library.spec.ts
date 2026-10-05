@@ -143,6 +143,130 @@ test('review leases, strict compatibility and stale revisions are enforced befor
     await f.close()
   }
 })
+test('native review renders once per revision and publishes the exact reviewed master', async () => {
+  const f = await syntheticMerge([1, 1], { comparisons: true }),
+    reviews = new MergeReviews(f.directory, async (id) => ({
+      source: f.sources.find((s) => s.photo.id === id)!,
+      path: 'unused',
+    }))
+  let calls = 0,
+    release!: () => void
+  const wait = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  reviews.worker.run = async (job) => {
+    calls++
+    expect(job.comparisons).toBe(true)
+    expect(job).not.toHaveProperty('preview')
+    await wait
+    await cp(f.output, job.output, { recursive: true })
+    return structuredClone(f.result)
+  }
+  try {
+    const review = await reviews.create(
+      f.sources.map((s) => s.photo.id),
+      'noise',
+    )
+    const requests = [reviews.preview(review.id, 0), reviews.preview(review.id, 0)]
+    await expect.poll(() => calls).toBe(1)
+    expect(reviews.diagnostics(review.id, 0).status).toBe('pending')
+    expect(() => reviews.accept(review.id, 0)).toThrow('Wait')
+    release()
+    const [preview, same] = await Promise.all(requests)
+    expect(same).toEqual(preview)
+    expect(preview.width).toBe(f.result.asset.width)
+    expect(preview.height).toBe(f.result.asset.height)
+    expect(Object.keys(preview).sort()).toEqual([
+      'height',
+      'overlayUrl',
+      'recipe',
+      'referenceUrl',
+      'resultUrl',
+      'reviewId',
+      'revision',
+      'width',
+    ])
+    const sharp = (await import('sharp')).default
+    for (const name of ['result', 'reference', 'overlay']) {
+      const path = reviews.imagePath([review.id, '0', name])!
+      expect(await sharp(path).metadata()).toMatchObject({
+        width: preview.width,
+        height: preview.height,
+      })
+    }
+    for (const name of ['native-result', 'final-result', '../result'])
+      expect(reviews.imagePath([review.id, '0', name])).toBeUndefined()
+    await reviews.preview(review.id, 0)
+    expect(calls).toBe(1)
+    const next = await reviews.update(review.id, 0, { ...review.settings, strength: 25 })
+    expect(reviews.imagePath([review.id, '0', 'result'])).toBeUndefined()
+    await expect(reviews.preview(review.id, 0)).rejects.toThrow('Stale')
+    const updated = await reviews.preview(review.id, next.revision)
+    expect(calls).toBe(2)
+    expect(updated.recipe.resolution).toBe('native')
+    const accepted = reviews.accept(review.id, next.revision)
+    const { result, output } = await accepted.render(new AbortController().signal)
+    expect(result.asset.sha256).toBe(f.result.asset.sha256)
+    expect(await readFile(join(output, 'linear.f32'))).toEqual(
+      await readFile(join(f.output, 'linear.f32')),
+    )
+    expect(calls).toBe(2)
+    const abort = new AbortController()
+    abort.abort()
+    await expect(accepted.render(abort.signal)).rejects.toThrow()
+    await reviews.dispose(review.id, true)
+    expect(reviews.leased(f.sources.map((s) => s.photo.id))).toBe(false)
+  } finally {
+    release()
+    await reviews.close()
+    await f.close()
+  }
+})
+
+test('revision changes and closing cancel pending native work without publishing stale assets', async () => {
+  const f = await syntheticMerge([1, 1]),
+    reviews = new MergeReviews(f.directory, async (id) => ({
+      source: f.sources.find((s) => s.photo.id === id)!,
+      path: 'unused',
+    }))
+  let calls = 0,
+    cancelled = 0
+  reviews.worker.run = (_job, signal) => {
+    calls++
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener(
+        'abort',
+        () => {
+          cancelled++
+          reject(new Error('Native work cancelled.'))
+        },
+        { once: true },
+      )
+    })
+  }
+  try {
+    const review = await reviews.create(
+      f.sources.map((s) => s.photo.id),
+      'noise',
+    )
+    const first = expect(reviews.preview(review.id, 0)).rejects.toThrow('cancelled')
+    await expect.poll(() => calls).toBe(1)
+    const next = await reviews.update(review.id, 0, { ...review.settings, strength: 25 })
+    await first
+    expect(cancelled).toBe(1)
+    expect(reviews.diagnostics(review.id, next.revision).status).toBe('pending')
+    const second = expect(reviews.preview(review.id, next.revision)).rejects.toThrow('cancelled')
+    await expect.poll(() => calls).toBe(2)
+    await reviews.dispose(review.id)
+    await second
+    expect(cancelled).toBe(2)
+    expect(reviews.active()).toBeNull()
+    expect(reviews.imagePath([review.id, String(next.revision), 'result'])).toBeUndefined()
+  } finally {
+    await reviews.close()
+    await f.close()
+  }
+})
 test('damaged masters and masks fail validation before publication', async () => {
   const f = await syntheticMerge([1, 1])
   try {

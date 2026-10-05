@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MergeMode, MergePreview, MergeReview, MergeSettings } from '../../../shared/merge'
 import { AdjustmentInput } from './AdjustmentInput'
+import { MergeViewport } from './MergeViewport'
 import styles from './MergeDialog.module.css'
 
 export function MergeDialog({
@@ -17,15 +18,15 @@ export function MergeDialog({
   const dialog = useRef<HTMLDialogElement>(null),
     reviewRef = useRef<MergeReview | null>(null)
   const [review, setReview] = useState<MergeReview | null>(null),
-    [preview, setPreview] = useState<MergePreview | null>(null)
+    [preview, setPreview] = useState<MergePreview | null>(null),
+    [decodedPreview, setDecodedPreview] = useState<MergePreview | null>(null)
   const [settings, setSettings] = useState<MergeSettings | null>(null),
     [strength, setStrength] = useState(50)
   const [error, setError] = useState(''),
     [updating, setUpdating] = useState(true),
     [starting, setStarting] = useState(false)
   const [comparison, setComparison] = useState(false),
-    [overlay, setOverlay] = useState(false),
-    [detail, setDetail] = useState(false)
+    [overlay, setOverlay] = useState(false)
   const desired = useRef<MergeSettings | null>(null),
     generation = useRef(0),
     tail = useRef(Promise.resolve())
@@ -47,7 +48,11 @@ export function MergeDialog({
         setSettings(value.settings)
         desired.current = value.settings
         return window.luma.requestMergePreview(value.id, value.revision).then((result) => {
-          if (active && reviewRef.current?.revision === result.revision) {
+          if (
+            active &&
+            generation.current === ticket &&
+            reviewRef.current?.revision === result.revision
+          ) {
             setPreview(result)
             setUpdating(false)
           }
@@ -73,9 +78,10 @@ export function MergeDialog({
       })
     }
   }, [ids, mode])
-  function change(patch: Partial<MergeSettings>) {
+  function change(patch: Partial<MergeSettings>, retry = false) {
     if (!desired.current) return
     if (
+      !retry &&
       (Object.keys(patch) as (keyof MergeSettings)[]).every(
         (key) => desired.current![key] === patch[key],
       )
@@ -84,7 +90,6 @@ export function MergeDialog({
     desired.current = { ...desired.current, ...patch }
     setSettings(desired.current)
     setUpdating(true)
-    setDetail(false)
     setError('')
     const ticket = ++generation.current
     // Debounce expensive preparation; stale results never enable Merge.
@@ -132,32 +137,8 @@ export function MergeDialog({
     dialog.current?.close()
     onClose()
   }
-  async function nativeDetail() {
-    if (detail) {
-      setDetail(false)
-      return
-    }
-    const current = reviewRef.current
-    if (!current || updating) return
-    const ticket = generation.current
-    setUpdating(true)
-    setError('')
-    try {
-      const result = await window.luma.requestMergePreview(current.id, current.revision, true)
-      if (ticket === generation.current) {
-        setPreview(result)
-        setDetail(true)
-        setUpdating(false)
-      }
-    } catch (error) {
-      if (ticket === generation.current) {
-        setError(error instanceof Error ? error.message : String(error))
-        setUpdating(false)
-      }
-    }
-  }
   async function start() {
-    if (!review || !preview || updating) return
+    if (!review || !preview || decodedPreview !== preview || updating || error) return
     setStarting(true)
     try {
       await window.luma.startMerge(review.id, preview.revision)
@@ -217,59 +198,24 @@ export function MergeDialog({
             </button>
           ))}
         </aside>
-        <section className={styles.center} aria-label="Merge preview" aria-busy={updating}>
-          <div className={styles.toolbar}>
-            <button aria-pressed={comparison} onClick={() => setComparison(!comparison)}>
-              Show {comparison ? 'merged result' : 'prepared reference'}
-            </button>
-            <button
-              aria-pressed={detail}
-              onClick={() => void nativeDetail()}
-              disabled={!preview || updating}
-            >
-              {' '}
-              {detail ? 'Fit preview' : 'Native detail (100%)'}
-            </button>
-          </div>
-          <div className={`${styles.imageArea} ${detail ? styles.detail : ''}`}>
-            {preview && (
-              <div className={styles.imageWrap}>
-                <img
-                  src={
-                    detail
-                      ? comparison
-                        ? preview.nativeReferenceUrl
-                        : preview.nativeResultUrl
-                      : comparison
-                        ? preview.referenceUrl
-                        : preview.resultUrl
-                  }
-                  alt={comparison ? 'Prepared reference' : 'Merged result'}
-                />
-                {overlay && !comparison && (
-                  <img
-                    className={styles.overlay}
-                    src={detail ? preview.nativeOverlayUrl : preview.overlayUrl}
-                    alt="Deghosted areas"
-                  />
-                )}
-              </div>
-            )}
-            {updating && (
-              <p className={styles.loading} role="status">
-                {preview ? 'Updating merge preview…' : 'Decoding originals and preparing merge…'}
-              </p>
-            )}
-          </div>
-          {preview && (
+        <div className={styles.center}>
+          <MergeViewport
+            preview={error ? null : preview}
+            busy={updating || starting}
+            comparison={comparison}
+            overlay={overlay}
+            onComparison={() => setComparison(!comparison)}
+            onReady={setDecodedPreview}
+            onError={setError}
+          />
+          {preview && decodedPreview === preview && !updating && !error && (
             <p>
               {preview.width} × {preview.height} pixels ·{' '}
-              {preview.recipe.resolution === 'preview' ? 'Reduced preview · approximately ' : ''}
               {preview.recipe.affectedPercent.toFixed(2)}% deghosted ·{' '}
               {preview.recipe.referenceClippedPercent.toFixed(2)}% uses a clipped reference
             </p>
           )}
-        </section>
+        </div>
         <aside className={styles.controls} aria-label="Merge settings">
           {settings && (
             <>
@@ -352,9 +298,12 @@ export function MergeDialog({
         </aside>
       </div>
       {error && (
-        <p role="alert" className={styles.error}>
-          {error}
-        </p>
+        <div className={styles.error}>
+          <p role="alert">{error}</p>
+          {review && !updating && !starting && (
+            <button onClick={() => change({}, true)}>Retry preview</button>
+          )}
+        </div>
       )}
       <footer>
         <span>
@@ -364,7 +313,12 @@ export function MergeDialog({
         </span>
         <button
           disabled={
-            starting || updating || !!error || !preview || preview.revision !== review?.revision
+            starting ||
+            updating ||
+            !!error ||
+            !preview ||
+            decodedPreview !== preview ||
+            preview.revision !== review?.revision
           }
           onClick={() => void start()}
         >

@@ -59,11 +59,8 @@ const tools = [
   {
     name: 'luma_request_merge_preview',
     description:
-      'Prepare and validate the linear merge. Returns application image URLs and the reviewed recipe.',
-    inputSchema: schema({ reviewId, expectedRevision, detail: { type: 'boolean' } }, [
-      'reviewId',
-      'expectedRevision',
-    ]),
+      'Prepare and validate the native merge. Returns full-resolution result, reference and overlay URLs and the reviewed recipe.',
+    inputSchema: schema({ reviewId, expectedRevision }),
   },
   {
     name: 'luma_start_merge',

@@ -26,9 +26,6 @@ interface ReviewState {
   work?: Promise<MergeResult>
   result?: MergeResult
   output?: string
-  nativeWork?: Promise<MergeResult>
-  nativeResult?: MergeResult
-  nativeOutput?: string
   failure?: MergeFailure
   accepted: boolean
   updating?: boolean
@@ -67,7 +64,7 @@ export class MergeReviews {
           .diagnostics,
       })),
       error: s.failure,
-      measurements: s.nativeResult?.recipe.measurements ?? s.result?.recipe.measurements,
+      measurements: s.result?.recipe.measurements,
     })
   }
   async create(ids: string[], mode: MergeMode): Promise<MergeReview> {
@@ -162,19 +159,15 @@ export class MergeReviews {
       s.updating = true
       s.review = { ...s.review, revision: revision + 1, settings: structuredClone(settings) }
       s.abort.abort()
-      await Promise.all([s.work?.catch(() => {}), s.nativeWork?.catch(() => {})])
+      await s.work?.catch(() => {})
       if (this.state !== s || s.closing) throw new Error('Merge review is unavailable.')
       await rm(join(s.directory, `revision-${revision}`), { recursive: true, force: true })
-      await rm(join(s.directory, `native-${revision}`), { recursive: true, force: true })
       if (previousReference !== settings.referenceId)
         await rm(join(s.directory, 'prepared'), { recursive: true, force: true })
       s.work = undefined
       s.result = undefined
       s.failure = undefined
       s.output = undefined
-      s.nativeWork = undefined
-      s.nativeResult = undefined
-      s.nativeOutput = undefined
       s.abort = new AbortController()
       s.updating = false
     } finally {
@@ -182,8 +175,7 @@ export class MergeReviews {
     }
     return structuredClone(s.review)
   }
-  async preview(id: string, revision: number, detail = false): Promise<MergePreview> {
-    if (typeof detail !== 'boolean') throw new Error('Invalid merge detail request.')
+  async preview(id: string, revision: number): Promise<MergePreview> {
     const s = this.get(id, revision)
     if (s.accepted) throw new Error('This merge was already accepted.')
     if (!s.work) {
@@ -195,7 +187,7 @@ export class MergeReviews {
         this.get(id, revision)
         return this.worker.run(
           {
-            preview: true,
+            comparisons: true,
             directory,
             output,
             paths: s.paths,
@@ -207,102 +199,43 @@ export class MergeReviews {
         )
       })()
     }
+    let result: MergeResult
     try {
-      s.result = await s.work
+      result = await s.work
+      this.get(id, revision)
+      if (
+        result.recipe.resolution !== 'native' ||
+        result.asset.width !== result.recipe.crop.width ||
+        result.asset.height !== result.recipe.crop.height
+      )
+        throw new Error('Invalid native merge preview.')
+      s.result = result
     } catch (error) {
       if (this.state === s && s.review.revision === revision) s.failure = mergeFailure(error)
       throw error
     }
-    this.get(id, revision)
-    const result = detail
-      ? await this.native(s, s.abort.signal, () => {}, true)
-      : (s.nativeResult ?? s.result)
     const url = `luma-photo://merge/${id}/${revision}`
     return {
       reviewId: id,
       revision,
-      resultUrl: `${url}/${s.nativeResult ? 'final-' : ''}result`,
-      referenceUrl: `${url}/${s.nativeResult ? 'final-' : ''}reference`,
-      overlayUrl: `${url}/${s.nativeResult ? 'final-' : ''}overlay`,
-      nativeResultUrl: `${url}/native-result`,
-      nativeReferenceUrl: `${url}/native-reference`,
-      nativeOverlayUrl: `${url}/native-overlay`,
-      width: result.recipe.crop.width,
-      height: result.recipe.crop.height,
+      resultUrl: `${url}/result`,
+      referenceUrl: `${url}/reference`,
+      overlayUrl: `${url}/overlay`,
+      width: result.asset.width,
+      height: result.asset.height,
       recipe: result.recipe,
-    }
-  }
-  private async native(
-    s: ReviewState,
-    signal: AbortSignal,
-    progress: (phase: string, completed: number, total: number) => void,
-    comparisons = false,
-  ): Promise<MergeResult> {
-    signal.throwIfAborted()
-    if (s.nativeResult) return s.nativeResult
-    if (s.result?.recipe.resolution === 'native') {
-      s.nativeOutput = s.output
-      return s.result
-    }
-    const cancel = () => s.abort.abort()
-    signal.addEventListener('abort', cancel, { once: true })
-    try {
-      if (!s.nativeWork) {
-        s.nativeOutput = join(s.directory, `native-${s.review.revision}`)
-        s.nativeWork = this.worker.run(
-          {
-            directory: join(s.directory, 'prepared'),
-            output: s.nativeOutput,
-            paths: s.paths,
-            sources: s.review.sources,
-            settings: s.review.settings,
-            recipe: s.result!.recipe,
-            comparisons,
-          },
-          s.abort.signal,
-          progress,
-        )
-      }
-      let result: MergeResult
-      try {
-        result = await s.nativeWork
-      } catch (error) {
-        if (this.state === s) s.failure = mergeFailure(error)
-        throw error
-      }
-      this.get(s.review.id, s.review.revision)
-      const initial = s.result!.measurements,
-        sameResult = initial === result.measurements,
-        final = structuredClone(result.measurements)
-      result.measurements = final
-      result.recipe.measurements = final
-      if (!sameResult) {
-        for (const stage of Object.keys(final.stages) as (keyof typeof final.stages)[])
-          final.stages[stage] += initial.stages[stage]
-        final.preparation = initial.preparation
-        final.attempts = initial.attempts
-        final.disk.readBytes += initial.disk.readBytes
-        final.disk.writtenBytes += initial.disk.writtenBytes
-        for (const key of Object.keys(final.peak) as (keyof typeof final.peak)[])
-          final.peak[key] = Math.max(final.peak[key], initial.peak[key])
-        final.runtimeMs += initial.runtimeMs
-      }
-      s.nativeResult = result
-      return result
-    } finally {
-      signal.removeEventListener('abort', cancel)
     }
   }
   accept(id: string, revision: number) {
     const s = this.get(id, revision)
-    if (s.accepted || !s.result || !s.output)
+    if (s.accepted || s.failure || !s.result || !s.output)
       throw new Error('Wait for the current merge preview before accepting.')
     s.accepted = true
     return {
-      render: async (
-        signal: AbortSignal,
-        progress: (phase: string, completed: number, total: number) => void,
-      ) => ({ result: await this.native(s, signal, progress), output: s.nativeOutput! }),
+      render: async (signal: AbortSignal) => {
+        signal.throwIfAborted()
+        return { result: s.result!, output: s.output! }
+      },
       review: structuredClone(s.review),
     }
   }
@@ -311,7 +244,7 @@ export class MergeReviews {
     if (s.accepted && !finished) throw new Error('Cancel the background merge task first.')
     s.closing = true
     s.abort.abort()
-    await Promise.all([s.work?.catch(() => {}), s.nativeWork?.catch(() => {})])
+    await s.work?.catch(() => {})
     await rm(s.directory, { recursive: true, force: true })
     if (this.state === s) this.state = undefined
   }
@@ -323,24 +256,16 @@ export class MergeReviews {
       parts[0] !== s.review.id ||
       parts[1] !== String(s.review.revision) ||
       !s.result ||
-      ![
-        'result',
-        'reference',
-        'overlay',
-        'native-result',
-        'native-reference',
-        'native-overlay',
-        'final-result',
-        'final-reference',
-        'final-overlay',
-      ].includes(parts[2])
+      !['result', 'reference', 'overlay'].includes(parts[2]) ||
+      !s.output ||
+      s.updating ||
+      s.closing ||
+      s.failure
     )
       return
-    const directory =
-      parts[2].startsWith('native-') || parts[2].startsWith('final-') ? s.nativeOutput : s.output
-    if (!directory) return
-    return join(directory, `${parts[2].replace(/^final-/, '')}.png`)
+    return join(s.output, `${parts[2]}.png`)
   }
+
   async close() {
     if (this.state) await this.dispose(this.state.review.id, true)
   }

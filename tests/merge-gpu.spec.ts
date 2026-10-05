@@ -520,7 +520,7 @@ test('tiled GPU warp, accumulation, deghost and output agree with independent CP
       await readFile(join(f.directory, 'cpu', 'motion.mask')),
     )
     const sharp = (await import('sharp')).default
-    for (const filename of ['native-result.png', 'result.png', 'reference.png']) {
+    for (const filename of ['result.png', 'reference.png', 'overlay.png']) {
       const ar = await sharp(join(f.directory, 'gpu', filename))
           .raw()
           .toBuffer(),

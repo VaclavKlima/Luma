@@ -131,7 +131,6 @@ export interface PreparedSource {
   decoder: string
   cameraProfile: string
   normalization: import('../../shared/hdr').HdrNormalization
-  review?: { path: string; strips: string[] }
   measurement?: MergeMeasurements['preparation'][number]
   gpuBytes?: number
   sensor?: SensorCache
@@ -194,16 +193,10 @@ export async function prepareSource(
           },
         })
         const data = new Float32Array(pw * ph),
-          mask = new Uint8Array(pw * ph),
-          rgba = new Float32Array(pw * ph * 4)
+          mask = new Uint8Array(pw * ph)
         for (let i = 0; i < data.length; i++) {
           const reduced = frame.mergeReduced!,
-            from = i * 8,
-            to = i * 4
-          rgba[to] = reduced[from]
-          rgba[to + 1] = reduced[from + 1]
-          rgba[to + 2] = reduced[from + 2]
-          rgba[to + 3] = reduced[from + 3]
+            from = i * 8
           data[i] = reduced[from + 4]
           mask[i] = reduced[from + 5] ? 255 : 0
         }
@@ -224,20 +217,7 @@ export async function prepareSource(
               const i = py * pw + px
               mask[i] = 0
               data[i] = 0
-              rgba[i * 4 + 3] = 0
             }
-        }
-        const reviewPath = join(directory, `source-${index}-review.f32`),
-          reviewFile = await open(reviewPath, 'w'),
-          reviewStrips: string[] = []
-        try {
-          for (let y = 0; y < ph; y += 64) {
-            const bytes = Buffer.from(rgba.buffer, y * pw * 16, Math.min(64, ph - y) * pw * 16)
-            reviewStrips.push(createHash('sha256').update(bytes).digest('hex'))
-            await reviewFile.writeFile(bytes)
-          }
-        } finally {
-          await reviewFile.close()
         }
         const sensor = await saveSensorCache(
           directory,
@@ -253,7 +233,6 @@ export async function prepareSource(
           width,
           height,
           plane: { width: pw, height: ph, data, mask },
-          review: { path: reviewPath, strips: reviewStrips },
           normalization: { ...raw.normalization, referenceWhite: 1 },
           decoder: `${decoder.id}-${decoder.version}`,
           cameraProfile: `${cameraProfile(source.metadata.make!, source.metadata.model!)!.id}-${cameraProfile(source.metadata.make!, source.metadata.model!)!.version}`,

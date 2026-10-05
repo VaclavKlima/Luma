@@ -1205,8 +1205,8 @@ export class PhotoLibrary {
   updateMergeReview(id: string, revision: number, settings: MergeSettings) {
     return this.merges.update(id, revision, settings)
   }
-  requestMergePreview(id: string, revision: number, detail = false) {
-    return this.merges.preview(id, revision, detail)
+  requestMergePreview(id: string, revision: number) {
+    return this.merges.preview(id, revision)
   }
   disposeMergeReview(id: string) {
     return this.merges.dispose(id)
@@ -1275,7 +1275,7 @@ export class PhotoLibrary {
         kind: 'merge',
         title: 'Merging photographs',
         status: 'running',
-        phase: 'Preparing native master',
+        phase: 'Publishing reviewed master',
         errorCount: 0,
         progress: { completed: 0, total: 3, unit: 'items' },
       } as BackgroundTask,
@@ -1290,16 +1290,7 @@ export class PhotoLibrary {
       let journaled = false
       try {
         const { review } = accepted
-        const { result, output } = await accepted.render(
-          task.abort.signal,
-          (phase, completed, total) => {
-            task.snapshot.phase = phase
-            task.snapshot.detail = total
-              ? `${Math.round((completed / total) * 100)}% of this phase`
-              : undefined
-            this.changed()
-          },
-        )
+        const { result, output } = await accepted.render(task.abort.signal)
         task.snapshot.title = 'Publishing merged photo'
         const publicationStart = performance.now()
         task.snapshot.phase = 'Verifying master'

@@ -8,7 +8,6 @@ import { accumulateGpu } from './gpu-accumulation'
 import { gpuOutput } from './gpu-output'
 import { coverageGpu } from './gpu-coverage'
 import { excludedBand, excludedCenters } from './exclusions'
-import { reducedSource } from './reduced'
 import { createHash } from 'node:crypto'
 import { open, writeFile, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -53,7 +52,6 @@ export interface MergeJob {
   settings: MergeSettings
   output: string
   recipe?: MergeRecipe
-  preview?: boolean
   comparisons?: boolean
 }
 export interface MergeResult {
@@ -140,7 +138,7 @@ async function runMergeInternal(
   await mkdir(output, { recursive: true })
   const referenceIndex = sources.findIndex((s) => s.photo.id === settings.referenceId),
     reference = sources[referenceIndex]
-  let prepared: PreparedSource[] = []
+  const prepared: PreparedSource[] = []
   const registrationKey = JSON.stringify({
     pipeline: MERGE_PIPELINE,
     alignment: ALIGNMENT_CONSTANTS,
@@ -193,7 +191,6 @@ async function runMergeInternal(
       measurements.disk.writtenBytes += await savePreparation(directory, i, settings.referenceId, p)
       measurements.disk.writtenBytes +=
         p.width * p.height * 16 +
-        (p.review ? p.plane.data.length * 16 : 0) +
         (p.sensor ? p.sensor.sensor.bytes + p.sensor.alpha.bytes + p.sensor.lens.bytes : 0)
     }
     if (
@@ -244,8 +241,8 @@ async function runMergeInternal(
     measurements.stages.preparation += m.preparationMs
     measurements.peak.gpuBytes = Math.max(measurements.peak.gpuBytes, p.gpuBytes ?? 0)
   }
-  let ref = prepared[referenceIndex]
-  let { width, height } = ref
+  const ref = prepared[referenceIndex]
+  const { width, height } = ref
   if (prepared.some((p) => p.width !== width || p.height !== height))
     throw new Error('Prepared native dimensions differ.')
   send({ phase: 'Aligning and checking exposures', completed: 0, total: sources.length })
@@ -505,37 +502,8 @@ async function runMergeInternal(
   } finally {
     measurements.stages.nativeValidation += performance.now() - coverageStart
   }
-  let crop = settings.autoCrop ? common.crop : { left: 0, top: 0, width, height }
+  const crop = settings.autoCrop ? common.crop : { left: 0, top: 0, width, height }
   const nativeGeometry = { width, height, crop, transforms: transforms.map((t) => ({ ...t })) }
-  if (job.preview) {
-    const reduced: PreparedSource[] = []
-    for (const [i, source] of prepared.entries()) {
-      await checkpoint()
-      const reductionStart = performance.now(),
-        hadReview = !!source.review
-      reduced.push(
-        await reducedSource(source, (bytes) => {
-          measurements.disk.writtenBytes += bytes
-        }),
-      )
-      if (!hadReview && source.review)
-        measurements.disk.writtenBytes += await savePreparation(
-          directory,
-          i,
-          settings.referenceId,
-          source,
-        )
-      measurements.stages.preparation += performance.now() - reductionStart
-    }
-    prepared = reduced
-    ref = prepared[referenceIndex]
-    for (let i = 0; i < transforms.length; i++)
-      transforms[i] = resizedTransform(transforms[i], width, height, ref.width, ref.height)
-    width = ref.width
-    height = ref.height
-    common = coverage(width, height, transforms)
-    crop = settings.autoCrop ? common.crop : { left: 0, top: 0, width, height }
-  }
   const motion = new Uint8Array(width * height)
   if (
     settings.deghost &&
@@ -725,15 +693,11 @@ async function runMergeInternal(
   const thumbScale = Math.min(1, 1024 / Math.max(crop.width, crop.height)),
     tw = Math.max(1, Math.floor(crop.width * thumbScale)),
     th = Math.max(1, Math.floor(crop.height * thumbScale))
-  const nativeResult = job.comparisons
-      ? await open(join(output, 'native-result.rgba'), 'wx')
-      : undefined,
+  const nativeResult = job.comparisons ? await open(join(output, 'result.rgba'), 'wx') : undefined,
     nativeReference = job.comparisons
-      ? await open(join(output, 'native-reference.rgba'), 'wx')
+      ? await open(join(output, 'reference.rgba'), 'wx')
       : undefined,
-    nativeOverlay = job.comparisons
-      ? await open(join(output, 'native-overlay.rgba'), 'wx')
-      : undefined
+    nativeOverlay = job.comparisons ? await open(join(output, 'overlay.rgba'), 'wx') : undefined
   let converter: Awaited<ReturnType<typeof gpuOutput>> | undefined
   if (usedGpu) {
     try {
@@ -746,10 +710,7 @@ async function runMergeInternal(
   }
   measurements.output ??= { backend: 'cpu' }
   const preview = Buffer.alloc(tw * th * 4),
-    refPreview = Buffer.alloc(tw * th * 4),
-    overlay = Buffer.alloc(tw * th * 4),
-    previewLinear = converter ? new Float32Array(tw * th * 4) : undefined,
-    referenceLinear = converter ? new Float32Array(tw * th * 4) : undefined
+    previewLinear = converter ? new Float32Array(tw * th * 4) : undefined
   const stripBytes = width * Math.min(64, crop.height) * 16,
     pixelBuffer = Buffer.allocUnsafe(stripBytes),
     referenceBuffer = Buffer.allocUnsafe(stripBytes),
@@ -829,30 +790,14 @@ async function runMergeInternal(
         const y = Math.floor(((py + 0.5) * crop.height) / th) - top
         for (let px = 0; px < tw; px++) {
           const x = Math.floor(((px + 0.5) * crop.width) / tw),
-            j = (y * crop.width + x) * 4,
-            i = (y * width + crop.left + x) * 4,
-            global = (top + crop.top + y) * width + crop.left + x,
-            m = mask[global] && common.mask[global]
+            j = (y * crop.width + x) * 4
           const k = (py * tw + px) * 4
-          if (previewLinear && referenceLinear) {
-            previewLinear.set(out.subarray(j, j + 4), k)
-            referenceLinear.set(referenceData.subarray(i, i + 4), k)
-            referenceLinear[k + 3] = out[j + 3]
-          } else {
-            const rgb = outputHdr([out[j], out[j + 1], out[j + 2]], SDR_TARGET).rgb,
-              rrgb = outputHdr(
-                [referenceData[i], referenceData[i + 1], referenceData[i + 2]],
-                SDR_TARGET,
-              ).rgb
-            for (let c = 0; c < 3; c++) {
-              preview[k + c] = Math.round(encodeHdr(rgb[c]) * 255)
-              refPreview[k + c] = Math.round(encodeHdr(rrgb[c]) * 255)
-            }
+          if (previewLinear) previewLinear.set(out.subarray(j, j + 4), k)
+          else {
+            const rgb = outputHdr([out[j], out[j + 1], out[j + 2]], SDR_TARGET).rgb
+            for (let c = 0; c < 3; c++) preview[k + c] = Math.round(encodeHdr(rgb[c]) * 255)
           }
-          preview[k + 3] = refPreview[k + 3] = out[j + 3] * 255
-          overlay[k] = 255
-          overlay[k + 2] = 180
-          overlay[k + 3] = m ? 160 : 0
+          preview[k + 3] = out[j + 3] * 255
         }
       }
       if (converter && job.comparisons) {
@@ -898,15 +843,13 @@ async function runMergeInternal(
       digest.update(outputBytes)
       asset.strips.push({ byteLength: outputBytes.length, sha256: hash(outputBytes) })
     }
-    if (previewLinear && referenceLinear) {
+    if (previewLinear) {
       try {
         if (!converter) throw new Error(measurements.output?.fallback ?? 'GPU output unavailable.')
         preview.set(await converter.convert(previewLinear))
-        refPreview.set(await converter.convert(referenceLinear))
       } catch (error) {
         measurements.output = { backend: 'cpu', fallback: mergeFailure(error).message }
         preview.set(displayLinear(previewLinear))
-        refPreview.set(displayLinear(referenceLinear))
       }
     }
     await outputFile.sync()
@@ -923,7 +866,7 @@ async function runMergeInternal(
     throw new Error(
       'Almost the entire image requires the reference. Choose another reference or reduce deghost strength.',
     )
-  for (const name of job.comparisons ? ['native-result', 'native-reference', 'native-overlay'] : [])
+  for (const name of job.comparisons ? ['result', 'reference', 'overlay'] : [])
     await sharp(await readFile(join(output, `${name}.rgba`)), {
       raw: { width: crop.width, height: crop.height, channels: 4 },
     })
@@ -931,14 +874,6 @@ async function runMergeInternal(
       .toFile(join(output, `${name}.png`))
   asset.sha256 = digest.digest('hex')
   await writeFile(join(output, 'motion.mask'), mask)
-  for (const [name, buffer] of [
-    ['result', preview],
-    ['reference', refPreview],
-    ['overlay', overlay],
-  ] as const)
-    await sharp(buffer, { raw: { width: tw, height: th, channels: 4 } })
-      .png()
-      .toFile(join(output, `${name}.png`))
   await sharp(preview, { raw: { width: tw, height: th, channels: 4 } })
     .resize({ width: 256, height: 256, fit: 'inside' })
     .flatten({ background: '#171717' })
@@ -949,7 +884,7 @@ async function runMergeInternal(
     .jpeg()
     .toFile(join(output, 'preview.jpg'))
   const recipe: MergeRecipe = {
-    resolution: job.preview ? 'preview' : 'native',
+    resolution: 'native',
     maskDimensions: { width, height },
     version: MERGE_VERSION,
     constants: MERGE_LIMITS,
@@ -974,11 +909,7 @@ async function runMergeInternal(
     referenceClippedPercent: covered ? (clipped / covered) * 100 : 0,
     maskSha256: hash(mask),
   }
-  if (
-    job.recipe?.resolution === 'native' &&
-    !job.preview &&
-    job.recipe.maskSha256 !== recipe.maskSha256
-  )
+  if (job.recipe?.resolution === 'native' && job.recipe.maskSha256 !== recipe.maskSha256)
     throw new Error('Recipe motion mask could not be reproduced.')
   measurements.stages.output = performance.now() - outputStart
   measurements.disk.readBytes += mergeReadBytes() + crop.height * width * 32
@@ -987,12 +918,9 @@ async function runMergeInternal(
     asset.byteLength +
     mask.length
   for (const name of [
-    'result.png',
-    'reference.png',
-    'overlay.png',
     'thumb.jpg',
     'preview.jpg',
-    ...(job.comparisons ? ['native-result.png', 'native-reference.png', 'native-overlay.png'] : []),
+    ...(job.comparisons ? ['result.png', 'reference.png', 'overlay.png'] : []),
   ])
     measurements.disk.writtenBytes += (await stat(join(output, name))).size
   if (job.comparisons) {

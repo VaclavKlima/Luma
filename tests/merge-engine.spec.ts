@@ -134,7 +134,7 @@ test('recorded recipe reproduces master bytes and detects damaged preparation st
   }
 })
 
-test('reduced linear review freezes native geometry and reproduces the full master on demand', async () => {
+test('native review uses capped alignment planes and reproduces its full master from the recipe', async () => {
   const f = await syntheticMerge([0.25, 1, 4], { width: 320, height: 192 })
   try {
     const { readFile, writeFile } = await import('node:fs/promises'),
@@ -152,18 +152,25 @@ test('reduced linear review freezes native geometry and reproduces the full mast
       cached.source.plane = { width, height, data }
       await writeFile(path, JSON.stringify(cached))
     }
-    const reduced = await runMerge({
+    const native = await runMerge({
       ...f.job,
-      output: join(f.directory, 'reduced'),
-      preview: true,
+      output: join(f.directory, 'native-review'),
+      comparisons: true,
     })
-    expect(reduced.asset.width).toBe(80)
-    expect(reduced.recipe.crop).toEqual({ left: 0, top: 0, width: 320, height: 192 })
-    expect(reduced.recipe.resolution).toBe('preview')
+    expect(native.asset.width).toBe(320)
+    expect(native.asset.height).toBe(192)
+    expect(native.recipe.crop).toEqual({ left: 0, top: 0, width: 320, height: 192 })
+    expect(native.recipe.resolution).toBe('native')
+    const sharp = (await import('sharp')).default
+    for (const name of ['result', 'reference', 'overlay']) {
+      const image = await sharp(join(f.directory, 'native-review', `${name}.png`)).metadata()
+      expect(image.width).toBe(320)
+      expect(image.height).toBe(192)
+    }
     const full = await runMerge({
       ...f.job,
       output: join(f.directory, 'native-detail'),
-      recipe: reduced.recipe,
+      recipe: native.recipe,
     })
     expect(full.recipe.resolution).toBe('native')
     expect(full.asset.sha256).toBe(f.result.asset.sha256)
