@@ -372,6 +372,7 @@ export function App() {
             </p>
           )}
           <PhotoPreview
+            suspended={!!mergeTargets}
             displayTarget={displayTarget}
             key={photo?.id ?? 'empty'}
             photo={photo}

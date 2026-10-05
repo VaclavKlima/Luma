@@ -10,7 +10,7 @@ interface State {
 }
 const empty: State = { preview: null, pixels: null, placeholder: null, error: null }
 
-export function useFullPreview(photoId: string | undefined) {
+export function useFullPreview(photoId: string | undefined, enabled = true) {
   const latestRevision = useRef(0)
   const displayedLease = useRef<FrameLease | null>(null)
   useEffect(
@@ -35,7 +35,7 @@ export function useFullPreview(photoId: string | undefined) {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<State>(empty)
   useEffect(() => {
-    if (!photoId) return
+    if (!photoId || !enabled) return
     const regenerate = attempt > 0 && revision === regenerateRevision.current
     const requestId = crypto.randomUUID()
     const abort = new AbortController()
@@ -100,7 +100,7 @@ export function useFullPreview(photoId: string | undefined) {
       if (frame && frame !== displayedLease.current) frame.release()
       void window.luma.releaseFullPreview(requestId).catch(() => undefined)
     }
-  }, [photoId, attempt, revision])
+  }, [photoId, attempt, revision, enabled])
 
   const retry = useCallback(() => {
     regenerateRevision.current = latestRevision.current

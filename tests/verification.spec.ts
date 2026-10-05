@@ -153,7 +153,10 @@ test('explicit scope unions and benchmark families preserve gates without overla
     ['--hdr-benchmark', 'hdr'],
     ['--merge-benchmark', 'merge'],
   ])
-    expect(files([mode])).toEqual([`tests/${file}-benchmark.spec.ts`])
+    expect(files([mode])).toEqual([
+      `tests/${file}-benchmark.spec.ts`,
+      ...(file === 'merge' ? ['tests/merge-preview-benchmark.spec.ts'] : []),
+    ])
   expect(selectPlan(['--benchmark-all']).groups).toHaveLength(4)
   const all = selectPlan(['--all'])
   expect(
@@ -197,7 +200,7 @@ test('one shared build, sequential phases, benchmark-only flags and measurement 
       expect(c.args).toContain('--workers=1')
     }
     expect(commands.slice(0, mcp).every((c) => c.env.LUMA_PREVIEW_BENCHMARK === '0')).toBe(true)
-    expect(result.benchmarks).toHaveLength(4)
+    expect(result.benchmarks).toHaveLength(suites.filter((suite) => suite.family).length)
     expect(result.baseline).toMatchObject({
       status: 'available',
       path: baseline,

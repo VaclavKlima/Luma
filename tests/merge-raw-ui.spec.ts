@@ -107,22 +107,17 @@ test('supplied Sony brackets review, publish, open and survive source deletion t
   await page.screenshot({ path: info.outputPath('merge-review-1100x700.png') })
   await page.getByRole('combobox', { name: 'Merge preview zoom' }).selectOption('1')
   await expect(viewport).toHaveAttribute('data-scale', '1')
-  const dimensions = await page.getByAltText('Merged result', { exact: true }).evaluate((image) => {
-    const img = image as HTMLImageElement,
-      box = img.getBoundingClientRect()
-    return {
-      width: img.naturalWidth,
-      height: img.naturalHeight,
-      displayedWidth: box.width,
-      displayedHeight: box.height,
-    }
-  })
+  const canvas = page.getByTestId('merge-preview')
+  await expect(canvas).toHaveAttribute('data-scale', '1')
+  const dimensions = await canvas.evaluate((image) => ({
+    width: Number(image.dataset.imageWidth),
+    height: Number(image.dataset.imageHeight),
+  }))
   expect(dimensions.width).toBeGreaterThan(1024)
-  expect(dimensions.displayedWidth).toBe(dimensions.width)
-  expect(dimensions.displayedHeight).toBe(dimensions.height)
+  await expect(page.getByTestId('main-preview')).toHaveAttribute('data-suspended', 'true')
   await page.getByRole('button', { name: 'Show prepared reference' }).click()
   await expect(viewport).toHaveAttribute('data-scale', '1')
-  await expect(page.getByAltText('Prepared reference')).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Prepared reference', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Show merged result' }).click()
   await page.getByRole('button', { name: 'Fit merge preview' }).click()
   await expect(viewport).toHaveAttribute('data-fit', 'true')

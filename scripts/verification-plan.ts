@@ -17,6 +17,7 @@ const definitions: Suite[] = [
   { file: 'merge-raw-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'library', 'mcp'] },
   { file: 'merge-ui', group: 'electron', scopes: ['ui', 'library', 'mcp'] },
   { file: 'merge-preview-ui', group: 'electron', scopes: ['ui', 'preview', 'library'] },
+  { file: 'merge-preview-benchmark', group: 'benchmark', scopes: [], family: 'merge' },
   { file: 'merge-library', group: 'service', scopes: ['library', 'adjustments', 'preview'] },
   { file: 'merge-raw', group: 'raw-gpu', scopes: ['preview', 'library'] },
   { file: 'merge-gpu', group: 'raw-gpu', scopes: ['preview', 'library'] },

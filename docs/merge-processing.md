@@ -12,6 +12,10 @@ HDR and noise reviews open at Fit without enlarging small images. Wheel zoom sta
 
 The result, prepared reference and motion overlay share validated native crop dimensions and one viewport transform. Settings, mode, reference and comparison changes preserve manual zoom and the normalized image center; resize and crop changes constrain pan. Each new review starts at Fit. Loading displays a neutral state, cancels dragging and rejects stale responses. Merge waits for the current native revision and decoded images. **Retry preview** revises the same settings before preparing again, preserving the view and clearing the retained failure through the existing revision contract.
 
+Review presentation uses one viewport-sized WebGL2 canvas. The result, reference and overlay upload once per revision; wheel and pointer events accumulate their full geometry changes and draw at most once per animation frame. Overlay composition shares the image coordinates, with premultiplied filtering at transparent edges. Reduction uses mipmaps; magnification uses native nearest pixels and the normal preview's subtle grid from 800%. Canvas2D fallback clips the visible native source region and draws the same grid. Context loss replaces the surface and validates it before enabling Merge again. Closing, loading and revision changes release textures and decoded images and cancel pending frames.
+
+While a merge dialog covers the workspace, the main photo renderer releases its presentation resources and pauses preview requests, working preparation and analysis. Its photo, zoom, pan and edits stay in memory; closing the dialog restores the same view and resumes presentation. Processing and publication use the existing native master throughout.
+
 Each revision renders one native master and its comparison images. Acceptance publishes that exact reviewed master without another accumulation pass. Reduced luminance/validity planes still serve alignment, and thumbnails remain reduced for library browsing. The review uses the existing controlled SDR display transform; native detail describes spatial resolution, not a new HDR presentation mode.
 
 ## Algorithms and bounds
@@ -65,6 +69,14 @@ All eight feature targets (`merge-preview-ui`, `merge-ui`, `merge-library`, `mer
 Direct `luma_ui` inspection used a verified temporary `dev:mcp` profile at 1100 × 700 with the console open. The supplied read-only Sony pair produced a 3659 × 5469 native crop; 100% displayed exactly those dimensions in CSS pixels. Wheel zoom, dragging, scoped keyboard panning, prepared-reference comparison, overlay alignment, numeric cancellation and Fit passed. Changing Auto Crop produced 3672 × 5496 pixels while retaining scale and normalized framing. The review closed with its selection intact; development processes and the temporary profile were removed. Existing CPU/GPU agreement, fallback and publication/restart/source-preservation checks passed. Windows/macOS and performance benchmarks remain outside this verification.
 
 Evidence: `artifacts/verification/2026-10-05T16-49-26.212Z-native-merge-review-bXMc2k/summary.md`, with links to the selected automated runs and retained failure evidence.
+
+### Merge interaction performance (2026-10-05)
+
+The viewport-sized renderer, shared pixel grid and main-preview suspension passed **97 distinct tests**, including 75 cheap Node checks. The focused preview/merge/benchmark invocation passed 92/92 in 57.5 seconds. The actual Sony pair passed native review, publication, source deletion and restart in 20.4 seconds; the HDR selection took 84.5 seconds overall. Its desktop focus assertion encountered an inactive Wayland window and passed its exact rerun in 21.8 seconds. A separate context-loss regression passed in 3.2 seconds, retaining the reviewed master and view while validating Canvas2D recovery. Rendered-pixel tests cover grid onset, overlay coordinates, reference switching, pan and resize through both backends; rapid-event coverage confirms one draw consumes an entire anchored wheel burst.
+
+Eight warmed gesture cases measured a textured 3672 × 5496 image at 100%/800%, with overlay off/on. Local browser-presentation p95 fell from 19.3–20.1 ms in the baseline run to 7.3–8.1 ms with the new renderer on the Radeon RX 7900 XTX. Every case retained 60 samples after five warmups and passed the 33 ms gate. These separate local runs include the next animation frame and posted paint task; they exclude physical input delivery and RAW preparation. The viewport was 587 × 476.5 CSS pixels at DPR 1. The real Sony crop also displayed correctly with the overlay. Temporary profiles and test processes were cleaned up. Earlier failed runs remain retained with passing reruns; Windows/macOS and physical-input latency remain unverified.
+
+Evidence: `artifacts/verification/2026-10-05T17-48-40.202Z-merge-interaction-zZGVtn/summary.md`, with deduplicated cases, measurements and original failure links. Run `npm run verify -- --target merge-preview-benchmark` for the isolated interaction performance target; a comprehensive processing checkpoint was not run.
 
 ### Linux verification record (2026-09-30)
 

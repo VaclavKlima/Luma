@@ -1,192 +1,5 @@
-import type { ElectronApplication, Page } from '@playwright/test'
-import sharp from 'sharp'
 import { test, expect } from './electron.fixture'
-import { importPhotos } from './import.helpers'
-import {
-  MERGE_LIMITS,
-  MERGE_VERSION,
-  type MergeReview,
-  type MergeRecipe,
-} from '../src/shared/merge'
-
-async function setup(
-  app: ElectronApplication,
-  page: Page,
-  width = 1600,
-  height = 1000,
-  holdInitial = false,
-  sourceCount = 2,
-) {
-  await importPhotos(app, page)
-  const photos = (await page.evaluate(() => window.luma.listPhotos())).photos
-  const native = await app.browserWindow(page)
-  await native.evaluate((w) => {
-    w.unmaximize()
-    w.setContentSize(1100, 700)
-  })
-  await page.getByTestId('console-toggle').click()
-  const assets = await Promise.all(
-    [
-      [width, height],
-      [800, 600],
-    ].map(async ([width, height]) => {
-      const urls = await Promise.all(
-        ['#646464', '#414141', '#b500a040'].map(
-          async (background) =>
-            `data:image/png;base64,${(
-              await sharp({ create: { width, height, channels: 4, background } })
-                .png()
-                .toBuffer()
-            ).toString('base64')}`,
-        ),
-      )
-      return { width, height, urls }
-    }),
-  )
-  const review: MergeReview = {
-    id: 'fixture-review',
-    revision: 0,
-    scratchBytes: 1024,
-    sources: Array.from({ length: sourceCount }, (_, i) => ({
-      photo:
-        i < photos.length
-          ? photos[i]
-          : { ...photos[i % photos.length], id: i.toString(16).padStart(64, '0') },
-      relativeEv: 0,
-      capture: { shutterSeconds: 1 / 125, iso: 400, aperture: 4, focalLength: 9.4 },
-      metadata: {} as MergeReview['sources'][number]['metadata'],
-    })),
-    settings: {
-      mode: 'hdr',
-      autoAlign: true,
-      deghost: true,
-      strength: 50,
-      autoCrop: true,
-      referenceId: photos[1].id,
-    },
-  }
-  const recipe: MergeRecipe = {
-    resolution: 'native',
-    version: MERGE_VERSION,
-    constants: MERGE_LIMITS,
-    settings: review.settings,
-    sources: [],
-    width,
-    height,
-    crop: { left: 0, top: 0, width, height },
-    maskDimensions: { width, height },
-    affectedPercent: 2,
-    referenceClippedPercent: 0,
-    maskSha256: '',
-  }
-  const control = await app.evaluateHandle(
-    ({ ipcMain }, { review, recipe, assets, holdInitial }) => {
-      let active = structuredClone(review),
-        disposed = 0,
-        creates = 0
-      const holds = new Map<number, { wait: Promise<void>; release: () => void }>()
-      const failures = new Set<number>(),
-        mismatches = new Set<number>()
-      const calls: { revision: number; arguments: number }[] = []
-      function hold(revision: number) {
-        let release!: () => void
-        const wait = new Promise<void>((resolve) => {
-          release = resolve
-        })
-        holds.set(revision, { wait, release })
-      }
-      if (holdInitial) hold(0)
-      const handlers = {
-        'merge:create': (_event: unknown, _ids: string[], mode: 'hdr' | 'noise') => {
-          active = {
-            ...structuredClone(review),
-            id: `fixture-review-${++creates}`,
-            settings: { ...review.settings, mode },
-          }
-          return { result: active }
-        },
-        'merge:active': () => ({ result: active }),
-        'merge:update': (
-          _event: unknown,
-          id: string,
-          revision: number,
-          settings: MergeReview['settings'],
-        ) => {
-          if (id !== active.id || revision !== active.revision)
-            throw new Error('Stale fixture revision')
-          active = { ...active, revision: revision + 1, settings }
-          return { result: active }
-        },
-        'merge:preview': async (...args: unknown[]) => {
-          const revision = args[2] as number,
-            snapshot = structuredClone(active)
-          calls.push({ revision, arguments: args.length - 1 })
-          await holds.get(revision)?.wait
-          if (failures.has(revision))
-            return {
-              error: {
-                code: 'processing',
-                message: 'Injected native render failure.',
-                filenames: [],
-                diagnostics: [],
-              },
-            }
-          const image = assets[snapshot.settings.autoCrop ? 0 : 1]
-          return {
-            result: {
-              reviewId: snapshot.id,
-              revision,
-              width: image.width + Number(mismatches.has(revision)),
-              height: image.height,
-              resultUrl: image.urls[0],
-              referenceUrl: image.urls[1],
-              overlayUrl: image.urls[2],
-              recipe: {
-                ...recipe,
-                settings: snapshot.settings,
-                crop: { ...recipe.crop, width: image.width, height: image.height },
-              },
-            },
-          }
-        },
-        'merge:dispose': () => {
-          disposed++
-          return { result: undefined }
-        },
-      }
-      for (const [name, handler] of Object.entries(handlers)) {
-        ipcMain.removeHandler(name)
-        ipcMain.handle(name, handler)
-      }
-      return {
-        hold,
-        release: (revision: number) => holds.get(revision)?.release(),
-        fail: (revision: number) => failures.add(revision),
-        mismatch: (revision: number) => mismatches.add(revision),
-        state: () => ({ calls, disposed, revision: active.revision }),
-      }
-    },
-    { review, recipe, assets, holdInitial },
-  )
-  await page.getByTestId(`photo-card-${photos[0].id}`).click()
-  await page.getByTestId(`photo-card-${photos[1].id}`).click({ modifiers: ['Shift'] })
-  async function open(mode = 'Merge to HDR…') {
-    await page.getByRole('button', { name: 'Actions', exact: true }).click()
-    await page.getByRole('menuitem', { name: mode, exact: true }).click()
-  }
-  await open()
-  const viewport = page.getByTestId('merge-viewport'),
-    zoom = page.getByRole('combobox', { name: 'Merge preview zoom' })
-  if (!holdInitial) await expect(viewport).toHaveAttribute('data-ready', 'true')
-  const view = () =>
-    viewport.evaluate((el) => ({
-      scale: Number(el.dataset.scale),
-      x: Number(el.dataset.panX),
-      y: Number(el.dataset.panY),
-      fit: el.dataset.fit === 'true',
-    }))
-  return { control, viewport, zoom, view, native, open }
-}
+import { setupMergePreview as setup } from './merge-preview.helpers'
 
 test('native pixel scale, pointer anchoring, bounded drag and scoped zoom shortcuts', async ({
   luma,
@@ -196,9 +9,12 @@ test('native pixel scale, pointer anchoring, bounded drag and scoped zoom shortc
   const box = (await viewport.boundingBox())!
   expect((await view()).scale).toBeCloseTo(Math.min(1, box.width / 1600, box.height / 1000), 5)
   await zoom.selectOption('1')
-  const image = page.getByAltText('Merged result', { exact: true })
-  expect((await image.boundingBox())!.width).toBe(1600)
-  expect((await image.boundingBox())!.height).toBe(1000)
+  const image = page.getByTestId('merge-preview')
+  await expect(image).toHaveAttribute('data-scale', '1')
+  await expect(image).toHaveAttribute('data-image-width', '1600')
+  await expect(image).toHaveAttribute('data-image-height', '1000')
+  expect((await image.boundingBox())!.width).toBeCloseTo(box.width, 3)
+  expect((await image.boundingBox())!.height).toBeCloseTo(box.height, 3)
   const pointer = { x: box.x + box.width / 2 + 70, y: box.y + box.height / 2 + 45 },
     before = await view()
   await page.mouse.move(pointer.x, pointer.y)
@@ -229,8 +45,8 @@ test('native pixel scale, pointer anchoring, bounded drag and scoped zoom shortc
   await expect(viewport).toHaveAttribute('data-dragging', 'true')
   await page.mouse.move(box.x + box.width + 500, box.y + box.height + 300)
   await page.mouse.up()
-  expect((await view()).x).toBeCloseTo((1600 - box.width) / 2, 4)
-  expect((await view()).y).toBeCloseTo((1000 - box.height) / 2, 4)
+  await expect.poll(async () => (await view()).x).toBeCloseTo((1600 - box.width) / 2, 4)
+  await expect.poll(async () => (await view()).y).toBeCloseTo((1000 - box.height) / 2, 4)
   await expect(viewport).toHaveAttribute('data-dragging', 'false')
   await viewport.focus()
   await viewport.press('0')
@@ -275,18 +91,20 @@ test('comparison, overlay and native revisions retain zoom and normalized framin
   await viewport.press('ArrowUp')
   const before = await view()
   await page.getByRole('checkbox', { name: 'Show deghost overlay' }).check()
-  expect(await page.getByAltText('Deghosted areas').boundingBox()).toEqual(
-    await page.getByAltText('Merged result', { exact: true }).boundingBox(),
-  )
+  const image = page.getByTestId('merge-preview')
+  await expect(image).toHaveAttribute('data-overlay', 'true')
+  await expect(image).toHaveAttribute('data-pan-x', String(before.x))
+  await expect(image).toHaveAttribute('data-pan-y', String(before.y))
   await page.getByRole('button', { name: 'Show prepared reference' }).click()
   expect(await view()).toEqual(before)
-  await expect(page.getByAltText('Deghosted areas')).toHaveCount(0)
+  await expect(image).toHaveAttribute('data-overlay', 'false')
+  await expect(image).toHaveAttribute('data-comparison', 'true')
   await page.getByRole('button', { name: 'Show merged result' }).click()
   expect(await view()).toEqual(before)
   await control.evaluate((c) => c.hold(1))
   await page.getByRole('checkbox', { name: 'Auto Crop', exact: true }).uncheck()
   await expect(viewport).toHaveAttribute('data-ready', 'false')
-  await expect(page.getByAltText('Merged result', { exact: true })).toHaveCount(0)
+  await expect(image).toBeHidden()
   await expect(zoom).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Merge', exact: true })).toBeDisabled()
   await viewport.dispatchEvent('wheel', { deltaY: -200 })
@@ -298,7 +116,7 @@ test('comparison, overlay and native revisions retain zoom and normalized framin
   expect(after.scale).toBe(before.scale)
   expect(after.x).toBe((before.x * 800) / 1600)
   expect(after.y).toBe((before.y * 600) / 1000)
-  expect((await page.getByAltText('Merged result', { exact: true }).boundingBox())!.width).toBe(800)
+  await expect(image).toHaveAttribute('data-image-width', '800')
   await page
     .getByRole('complementary', { name: 'Merge sources' })
     .getByRole('button')
@@ -344,7 +162,7 @@ test('stale native replies cannot enable Merge, and failed or invalid frames ret
   await control.evaluate((c) => c.mismatch(3))
   await page.getByRole('button', { name: 'Retry preview' }).click()
   await expect(page.getByRole('alert')).toContainText('dimensions do not match')
-  await expect(page.getByAltText('Merged result', { exact: true })).toHaveCount(0)
+  await expect(page.getByTestId('merge-preview')).toBeHidden()
   await page.getByRole('button', { name: 'Retry preview' }).click()
   await expect(viewport).toHaveAttribute('data-ready', 'true')
   expect(await view()).toEqual(before)
@@ -428,9 +246,14 @@ for (const [width, height] of [
     const box = (await viewport.boundingBox())!,
       fit = Math.min(1, box.width / width, box.height / height)
     expect((await view()).scale).toBeCloseTo(fit, 5)
-    expect(
-      (await page.getByAltText('Merged result', { exact: true }).boundingBox())!.width,
-    ).toBeCloseTo(width * fit, 3)
+    await expect(page.getByTestId('merge-preview')).toHaveAttribute(
+      'data-image-width',
+      String(width),
+    )
+    await expect(page.getByTestId('merge-preview')).toHaveAttribute(
+      'data-scale',
+      String((await view()).scale),
+    )
     await native.evaluate((w) => w.setContentSize(1200, 760))
     const resized = (await viewport.boundingBox())!
     await expect
@@ -438,3 +261,184 @@ for (const [width, height] of [
       .toBeCloseTo(Math.min(1, resized.width / width, resized.height / height), 5)
   })
 }
+
+for (const fallback of [false, true]) {
+  test(`native pixels, overlay alignment and 800% grid survive pan and resize (${fallback ? 'Canvas2D' : 'WebGL2'})`, async ({
+    luma,
+  }) => {
+    const { app, page } = luma
+    if (fallback)
+      await page.evaluate(() => {
+        const getContext = HTMLCanvasElement.prototype.getContext
+        HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...args) {
+          if (args[0] === 'webgl2') return null
+          return Reflect.apply(getContext, this, args)
+        } as typeof getContext
+      })
+    const { zoom, viewport, view, native } = await setup(
+      app,
+      page,
+      1600,
+      1000,
+      false,
+      2,
+      false,
+      true,
+    )
+    const canvas = page.getByTestId('merge-preview')
+    await expect(canvas).toHaveAttribute('data-backend', fallback ? 'canvas2d' : 'webgl2')
+    async function colors() {
+      return canvas.evaluate((el) => {
+        const canvas = el as HTMLCanvasElement
+        const snapshot = document.createElement('canvas')
+        snapshot.width = canvas.width
+        snapshot.height = canvas.height
+        const context = snapshot.getContext('2d')!
+        context.drawImage(canvas, 0, 0)
+        const sample = (x: number) => [
+          ...context.getImageData(x, Math.floor(canvas.height / 2), 1, 1).data,
+        ]
+        const patch = context.getImageData(32, 32, 40, 40).data
+        const reds = Array.from({ length: patch.length / 4 }, (_, i) => patch[i * 4])
+        return {
+          left: sample(30),
+          right: sample(canvas.width - 30),
+          minimum: Math.min(...reds),
+          maximum: Math.max(...reds),
+        }
+      })
+    }
+    await zoom.selectOption('1')
+    await expect(canvas).toHaveAttribute('data-scale', '1')
+    expect((await colors()).left).toEqual([100, 100, 100, 255])
+    await page.getByRole('checkbox', { name: 'Show deghost overlay' }).check()
+    await expect(canvas).toHaveAttribute('data-overlay', 'true')
+    const tinted = await colors()
+    expect(tinted.left[0]).toBeGreaterThan(115)
+    expect(tinted.left[1]).toBeLessThan(80)
+    expect(tinted.right).toEqual([100, 100, 100, 255])
+    await page.getByRole('button', { name: 'Show prepared reference' }).click()
+    await expect(canvas).toHaveAttribute('data-comparison', 'true')
+    expect((await colors()).left).toEqual([65, 65, 65, 255])
+    await page.getByRole('button', { name: 'Show merged result' }).click()
+    await page.getByRole('checkbox', { name: 'Show deghost overlay' }).uncheck()
+    for (const scale of [4, 8, 16]) {
+      await zoom.selectOption(String(scale))
+      await expect(canvas).toHaveAttribute('data-scale', String(scale))
+      const pixels = await colors()
+      expect(pixels.minimum).toBe(100)
+      if (scale < 8) expect(pixels.maximum).toBe(100)
+      else expect(pixels.maximum).toBeGreaterThan(100)
+    }
+    await viewport.focus()
+    await viewport.press('ArrowLeft')
+    await expect(canvas).toHaveAttribute('data-pan-x', String((await view()).x))
+    expect((await colors()).maximum).toBeGreaterThan(100)
+    await native.evaluate((w) => w.setContentSize(1200, 760))
+    await expect
+      .poll(() => canvas.evaluate((el) => (el as HTMLCanvasElement).width))
+      .toBe(
+        Math.round(
+          (await viewport.boundingBox())!.width * (await page.evaluate(() => devicePixelRatio)),
+        ),
+      )
+    expect((await colors()).maximum).toBeGreaterThan(100)
+  })
+}
+
+test('a burst of anchored wheel events draws once and closing merge restores the main photo view', async ({
+  luma,
+}) => {
+  const { app, page } = luma
+  const { viewport, zoom } = await setup(app, page)
+  const main = page.getByTestId('main-preview')
+  await expect(main).toHaveAttribute('data-suspended', 'true')
+  await zoom.selectOption('1')
+  const canvas = page.getByTestId('merge-preview')
+  await expect(canvas).toHaveAttribute('data-scale', '1')
+  const burst = await viewport.evaluate(async (el) => {
+    const canvas = el.querySelector('canvas')!
+    const box = el.getBoundingClientRect()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    const frames = Number(canvas.dataset.frames)
+    const before = Number(el.dataset.scale)
+    let anchor = 0
+    for (let i = 0; i < 20; i++) {
+      const wheel = new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -2,
+        ctrlKey: true,
+        clientX: box.left + box.width / 2 + 50,
+        clientY: box.top + box.height / 2,
+      })
+      anchor = wheel.clientX - box.left - box.width / 2
+      el.dispatchEvent(wheel)
+    }
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    return {
+      draws: Number(canvas.dataset.frames) - frames,
+      scale: Number(canvas.dataset.scale),
+      x: Number(canvas.dataset.panX),
+      before,
+      anchor,
+    }
+  })
+  expect(burst.draws).toBe(1)
+  expect(burst.scale).toBeCloseTo(burst.before * Math.exp(0.08), 5)
+  expect((burst.anchor - burst.x) / burst.scale).toBeCloseTo(burst.anchor / burst.before, 5)
+  await viewport.press('Escape')
+  await expect(main).toHaveAttribute('data-suspended', 'false')
+  await expect(main).toBeVisible()
+  const normal = page.getByRole('combobox', { name: 'Preview zoom', exact: true })
+  await normal.selectOption('2')
+  await page.getByRole('button', { name: 'Actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Merge to HDR…', exact: true }).click()
+  await expect(main).toHaveAttribute('data-suspended', 'true')
+  await expect(viewport).toHaveAttribute('data-ready', 'true')
+  await viewport.press('Escape')
+  await expect(main).toHaveAttribute('data-suspended', 'false')
+  await expect(normal).toHaveValue('2')
+})
+
+test('context loss validates a replacement software surface without regenerating the master', async ({
+  luma,
+}) => {
+  const { app, page } = luma
+  const { control, viewport, zoom, view } = await setup(app, page)
+  await zoom.selectOption('8')
+  await viewport.focus()
+  await viewport.press('ArrowLeft')
+  const before = await view()
+  const canvas = page.getByTestId('merge-preview')
+  await expect(canvas).toHaveAttribute('data-backend', 'webgl2')
+  const decode = await page.evaluateHandle(() => {
+    const original = HTMLImageElement.prototype.decode
+    let release!: () => void
+    const wait = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    HTMLImageElement.prototype.decode = function () {
+      return wait.then(() => original.call(this))
+    }
+    return {
+      release: () => {
+        HTMLImageElement.prototype.decode = original
+        release()
+      },
+    }
+  })
+  await canvas.evaluate((el) => {
+    const gl = (el as HTMLCanvasElement).getContext('webgl2')!
+    gl.getExtension('WEBGL_lose_context')!.loseContext()
+  })
+  await expect(viewport).toHaveAttribute('data-ready', 'false')
+  await expect(page.getByRole('button', { name: 'Merge', exact: true })).toBeDisabled()
+  await decode.evaluate((d) => d.release())
+  await expect(viewport).toHaveAttribute('data-ready', 'true')
+  await expect(canvas).toHaveAttribute('data-backend', 'canvas2d')
+  await expect(canvas).toHaveAttribute('data-grid', 'true')
+  expect(await view()).toEqual(before)
+  expect((await control.evaluate((c) => c.state())).calls).toHaveLength(1)
+  await expect(page.getByRole('button', { name: 'Merge', exact: true })).toBeEnabled()
+})

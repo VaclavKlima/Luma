@@ -15,6 +15,7 @@ import {
   type View,
 } from '../preview/geometry'
 import styles from './MergeViewport.module.css'
+import { MergePresenter } from '../preview/merge-presenter'
 
 interface Model {
   image: Size
@@ -36,10 +37,14 @@ export function MergeViewport({
   comparison: boolean
   overlay: boolean
   onComparison: () => void
-  onReady: (preview: MergePreview) => void
+  onReady: (preview: MergePreview | null) => void
   onError: (message: string) => void
 }) {
   const viewport = useRef<HTMLDivElement>(null)
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const presenter = useRef<MergePresenter | null>(null)
+  const frame = useRef(0)
+  const [fallback, setFallback] = useState(false)
   const [model, setModel] = useState<Model>({
     image: { width: 0, height: 0 },
     viewport: { width: 0, height: 0 },
@@ -50,19 +55,49 @@ export function MergeViewport({
     drag = useRef<{ id: number; x: number; y: number; moved: boolean } | null>(null),
     dragged = useRef(false)
   const [dragging, setDragging] = useState(false),
-    [decoded, setDecoded] = useState<MergePreview | null>(null),
+    [decoded, setDecoded] = useState<{ preview: MergePreview; fallback: boolean } | null>(null),
     [failed, setFailed] = useState<MergePreview | null>(null)
-  const ready = !!preview && decoded === preview && failed !== preview && !busy
+  const ready =
+    !!preview &&
+    decoded?.preview === preview &&
+    decoded.fallback === fallback &&
+    failed !== preview &&
+    !busy
   const interactive = useRef(ready)
+  const presentation = useRef({ comparison, overlay })
+  const schedule = useCallback(() => {
+    if (frame.current) return
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0
+      const model = current.current
+      setModel(model)
+      presenter.current?.draw(
+        model.image,
+        model.viewport,
+        model.view,
+        presentation.current.comparison,
+        presentation.current.overlay,
+      )
+    })
+  }, [])
+  useEffect(() => {
+    presentation.current = { comparison, overlay }
+    schedule()
+  }, [comparison, overlay, schedule])
+  useEffect(() => () => cancelAnimationFrame(frame.current), [])
   useEffect(() => {
     interactive.current = ready
   }, [ready])
-  const change = useCallback((action: (model: Model) => Model) => {
-    const next = action(current.current)
-    next.view = constrain(next.view, next.image, next.viewport)
-    current.current = next
-    setModel(next)
-  }, [])
+  const change = useCallback(
+    (action: (model: Model) => Model, immediate = true) => {
+      const next = action(current.current)
+      next.view = constrain(next.view, next.image, next.viewport)
+      current.current = next
+      if (immediate) setModel(next)
+      schedule()
+    },
+    [schedule],
+  )
   const stopDrag = useCallback(() => {
     const pointer = drag.current
     drag.current = null
@@ -75,6 +110,9 @@ export function MergeViewport({
 
   useEffect(() => {
     stopDrag()
+    cancelAnimationFrame(frame.current)
+    frame.current = 0
+    onReady(null)
     if (!preview || busy) return
     let active = true
     const images = [preview.resultUrl, preview.referenceUrl, preview.overlayUrl].map((url) => {
@@ -108,7 +146,28 @@ export function MergeViewport({
           reviewId.current = preview.reviewId
           return { ...model, image, view }
         })
-        setDecoded(preview)
+        try {
+          const renderer = new MergePresenter(canvas.current!, images, fallback, () =>
+            setFallback(true),
+          )
+          presenter.current = renderer
+          const model = current.current
+          renderer.draw(
+            model.image,
+            model.viewport,
+            model.view,
+            presentation.current.comparison,
+            presentation.current.overlay,
+          )
+        } catch {
+          if (!fallback) setFallback(true)
+          else {
+            setFailed(preview)
+            onError('Could not display the native merge preview. Retry to prepare it again.')
+          }
+          return
+        }
+        setDecoded({ preview, fallback })
         onReady(preview)
       },
       () => {
@@ -120,17 +179,25 @@ export function MergeViewport({
     )
     return () => {
       active = false
+      cancelAnimationFrame(frame.current)
+      frame.current = 0
+      presenter.current?.dispose()
+      presenter.current = null
+      for (const image of images) image.src = ''
     }
-  }, [preview, busy, change, stopDrag, onReady, onError])
+  }, [preview, busy, change, stopDrag, onReady, onError, fallback])
 
   useEffect(() => {
     const element = viewport.current!
     const observer = new ResizeObserver(([entry]) => {
       stopDrag()
-      change((model) => ({
-        ...model,
-        viewport: { width: entry.contentRect.width, height: entry.contentRect.height },
-      }))
+      change(
+        (model) => ({
+          ...model,
+          viewport: { width: entry.contentRect.width, height: entry.contentRect.height },
+        }),
+        false,
+      )
     })
     observer.observe(element)
     const wheel = (event: WheelEvent) => {
@@ -138,19 +205,22 @@ export function MergeViewport({
       if (!interactive.current) return
       stopDrag()
       const box = element.getBoundingClientRect()
-      change((model) => ({
-        ...model,
-        view: zoomAt(
-          model.view,
-          wheelScale(model.view.scale, event.deltaY, event.deltaMode, model.viewport.height),
-          {
-            x: event.clientX - box.left - box.width / 2,
-            y: event.clientY - box.top - box.height / 2,
-          },
-          model.image,
-          model.viewport,
-        ),
-      }))
+      change(
+        (model) => ({
+          ...model,
+          view: zoomAt(
+            model.view,
+            wheelScale(model.view.scale, event.deltaY, event.deltaMode, model.viewport.height),
+            {
+              x: event.clientX - box.left - box.width / 2,
+              y: event.clientY - box.top - box.height / 2,
+            },
+            model.image,
+            model.viewport,
+          ),
+        }),
+        false,
+      )
     }
     element.addEventListener('wheel', wheel, { passive: false })
     window.addEventListener('blur', stopDrag)
@@ -237,10 +307,13 @@ export function MergeViewport({
     pointer.moved ||= Math.abs(x) + Math.abs(y) > 2
     pointer.x = event.clientX
     pointer.y = event.clientY
-    change((model) => ({
-      ...model,
-      view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
-    }))
+    change(
+      (model) => ({
+        ...model,
+        view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
+      }),
+      false,
+    )
   }
   const preset = ZOOM_STOPS.find((stop) => Math.abs(stop - view.scale) < 0.00001)
   return (
@@ -329,31 +402,21 @@ export function MergeViewport({
           } else fit()
         }}
       >
-        {ready && (
-          <div
-            className={styles.image}
-            style={{
-              width: model.image.width,
-              height: model.image.height,
-              transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
-              imageRendering: view.scale > 1 ? 'pixelated' : 'auto',
-            }}
-          >
-            <img
-              src={comparison ? preview.referenceUrl : preview.resultUrl}
-              alt={comparison ? 'Prepared reference' : 'Merged result'}
-              draggable={false}
-            />
-            {overlay && !comparison && (
-              <img
-                className={styles.overlay}
-                src={preview.overlayUrl}
-                alt="Deghosted areas"
-                draggable={false}
-              />
-            )}
-          </div>
-        )}
+        <canvas
+          key={String(fallback)}
+          ref={canvas}
+          className={styles.canvas}
+          hidden={!ready}
+          role="img"
+          aria-label={
+            comparison
+              ? 'Prepared reference'
+              : overlay
+                ? 'Merged result with deghost overlay'
+                : 'Merged result'
+          }
+          data-testid="merge-preview"
+        />
         {!ready && (
           <p role="status" className={styles.status}>
             {failed === preview && preview

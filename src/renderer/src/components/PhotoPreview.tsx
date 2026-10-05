@@ -46,6 +46,7 @@ interface Model {
   view: View
 }
 interface Props {
+  suspended?: boolean
   displayTarget: DisplayTarget
   tools: PreviewTools
   gesturing: boolean
@@ -61,6 +62,7 @@ interface Props {
 
 // The parent keys this component by photo ID so every new photograph starts in Fit.
 export function PhotoPreview({
+  suspended = false,
   displayTarget,
   photo,
   adjustments,
@@ -96,7 +98,7 @@ export function PhotoPreview({
     view: INITIAL_VIEW,
   })
   const current = useRef(model)
-  const full = useFullPreview(photo?.id)
+  const full = useFullPreview(photo?.id, !suspended)
   const [displayedUrl, setDisplayedUrl] = useState('')
   const [fallback, setFallback] = useState(false)
   const presenter = useRef<PreviewPresenter | HdrPresenter | HdrCpuPresenter | null>(null)
@@ -109,7 +111,7 @@ export function PhotoPreview({
   }, [photo?.id])
   const fallbackReason = useRef('')
   const fullVisible = Boolean(full.preview && (displayedUrl || full.preview.linear?.hdr))
-  const live = useWorkingPreview(full.preview, fullVisible)
+  const live = useWorkingPreview(full.preview, fullVisible && !suspended)
   const { working, generation } = live
   const { mode, split, analyze, update } = tools
   const actualTarget = useMemo(
@@ -127,7 +129,7 @@ export function PhotoPreview({
   const shadows = tools.shadows || tools.hover === 'shadows'
   const highlights = tools.highlights || tools.hover === 'highlights'
   usePreviewAnalysis(
-    working?.hdr ? null : working,
+    working?.hdr || suspended ? null : working,
     `${photo?.id}-${working?.identity ?? 'pending'}-${generation}`,
     mode === 'before' ? neutralAdjustments : adjustments,
     shadows || highlights,
@@ -136,7 +138,7 @@ export function PhotoPreview({
     setMask,
   )
   const analysisError = useHdrAnalysis(
-    hdrReady ? working : null,
+    hdrReady && !suspended ? working : null,
     mode === 'before' ? neutralAdjustments : adjustments,
     actualTarget,
     'output',
@@ -148,7 +150,7 @@ export function PhotoPreview({
     if (gesturing && mode === 'before') update({ mode: 'after' })
   }, [gesturing, mode, update])
   const pixel = useHdrPixel(
-    working,
+    suspended ? null : working,
     mode === 'before' ? neutralAdjustments : adjustments,
     actualTarget,
     tools.domain,
@@ -156,7 +158,7 @@ export function PhotoPreview({
   useEffect(() => update({ hdr: !!working?.hdr }), [working?.hdr, update])
   useEffect(() => {
     const preview = full.preview
-    if (!preview) return
+    if (!preview || suspended) return
     const ready = working?.hdr ? hdrReady : !!displayedUrl
     let cancelled = false
     const report = () => {
@@ -189,6 +191,7 @@ export function PhotoPreview({
       cancelled = true
     }
   }, [
+    suspended,
     full.preview,
     working?.hdr,
     hdrReady,
@@ -210,6 +213,7 @@ export function PhotoPreview({
     setModel(next)
   }, [])
   const ready = Boolean(
+    !suspended &&
     photo &&
     model.loaded &&
     model.image.width &&
@@ -290,7 +294,7 @@ export function PhotoPreview({
   const { preview: renderedFrame, pixels, displayFailed } = full
   useEffect(() => {
     const canvas = image.current
-    if (!canvas) return
+    if (!canvas || suspended) return
     try {
       if (working?.hdr) {
         // A replacement surface has no validated pixels yet.
@@ -319,10 +323,16 @@ export function PhotoPreview({
       presenter.current?.dispose()
       presenter.current = null
     }
-  }, [fallback, generation, editingSurface, working?.hdr, displayFailed])
+  }, [fallback, generation, editingSurface, working?.hdr, displayFailed, suspended])
 
   useEffect(() => {
-    if (!renderedFrame || (!pixels && !renderedFrame.linear?.hdr) || !presenter.current) return
+    if (
+      suspended ||
+      !renderedFrame ||
+      (!pixels && !renderedFrame.linear?.hdr) ||
+      !presenter.current
+    )
+      return
     try {
       if (pixels && (!editingSurface || fallback)) presenter.current.setBitmap(pixels)
       const dimensions = { width: renderedFrame.width, height: renderedFrame.height }
@@ -339,9 +349,22 @@ export function PhotoPreview({
       if (!fallback) setFallback(true)
       else displayFailed()
     }
-  }, [renderedFrame, pixels, change, displayFailed, fallback, generation, editingSurface])
+  }, [
+    renderedFrame,
+    pixels,
+    change,
+    displayFailed,
+    fallback,
+    generation,
+    editingSurface,
+    suspended,
+  ])
 
   useEffect(() => {
+    if (suspended) {
+      onEditingReady(null)
+      return
+    }
     try {
       if (working) presenter.current?.setWorking(working)
       onEditingReady(working ? (photo?.id ?? null) : null)
@@ -351,7 +374,7 @@ export function PhotoPreview({
       setFallback(true)
     }
     return () => onEditingReady(null)
-  }, [working, fallback, generation, photo?.id, onEditingReady])
+  }, [working, fallback, generation, photo?.id, onEditingReady, suspended])
 
   useEffect(() => {
     if (
@@ -395,6 +418,7 @@ export function PhotoPreview({
   }, [model.viewport.width, model.viewport.height, working?.width, working?.height])
 
   useEffect(() => {
+    if (suspended) return
     const started = performance.now()
     const id = requestAnimationFrame(() => {
       presenter.current?.setComparison(mode, split)
@@ -422,6 +446,7 @@ export function PhotoPreview({
     })
     return () => cancelAnimationFrame(id)
   }, [
+    suspended,
     model,
     adjustments.exposureEv,
     adjustments.contrast,
@@ -670,6 +695,7 @@ export function PhotoPreview({
                 role="img"
                 aria-label={photo.filename}
                 data-testid="main-preview"
+                data-suspended={suspended}
                 data-src={full.preview?.url}
                 tabIndex={0}
                 aria-keyshortcuts="+ - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown"

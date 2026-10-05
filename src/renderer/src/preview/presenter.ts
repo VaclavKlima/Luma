@@ -14,6 +14,7 @@ import {
   type WorkingFrame,
 } from '../../../shared/adjustments'
 import type { Size, View } from './geometry'
+import { drawPixelGrid, pixelGridGlsl } from './pixel-grid'
 
 const vertex = `#version 300 es
 void main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0, 1); }`
@@ -57,10 +58,7 @@ void main() {
     rgb = mix(pow(rgb, vec3(1.0/2.4)) * (1.0+transform.z) - transform.z, rgb * 12.92, lessThan(rgb, vec3(transform.y)));
     color.rgb = quantize ? min(vec3(255), floor(rgb * 65536.0 / 256.0)) / 255.0 : floor(rgb * 255.0 + 0.5) / 255.0;
   }
-  float grid = clamp((scale - 4.0) / 12.0, 0.0, 1.0) * 0.22;
-  vec2 edge = min(fract(source), 1.0-fract(source)) * scale;
-  float coverage = clamp((0.5 + 0.5 / dpr - min(edge.x, edge.y)) * dpr, 0.0, 1.0);
-  if (scale >= 8.0) color.rgb = mix(color.rgb, vec3(0.5), grid * coverage);
+  ${pixelGridGlsl}
 }`
 
 export class PreviewPresenter {
@@ -308,33 +306,7 @@ export class PreviewPresenter {
         )
         context.restore()
       }
-      if (view.scale >= 8) {
-        context.save()
-        context.beginPath()
-        context.rect(left, top, image.width * view.scale, image.height * view.scale)
-        context.clip()
-        context.strokeStyle = `rgba(128,128,128,${Math.min(1, (view.scale - 4) / 12) * 0.22})`
-        context.lineWidth = 1
-        context.beginPath()
-        for (
-          let x = left + Math.max(0, Math.ceil(-left / view.scale)) * view.scale;
-          x <= Math.min(viewport.width, left + image.width * view.scale);
-          x += view.scale
-        ) {
-          context.moveTo(x, 0)
-          context.lineTo(x, viewport.height)
-        }
-        for (
-          let y = top + Math.max(0, Math.ceil(-top / view.scale)) * view.scale;
-          y <= Math.min(viewport.height, top + image.height * view.scale);
-          y += view.scale
-        ) {
-          context.moveTo(0, y)
-          context.lineTo(viewport.width, y)
-        }
-        context.stroke()
-        context.restore()
-      }
+      drawPixelGrid(context, image, viewport, view)
     }
     this.canvas.dataset.whiteBalance = JSON.stringify(
       parameters.whiteBalance ?? { mode: 'as-shot' },
