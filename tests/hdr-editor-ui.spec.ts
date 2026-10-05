@@ -23,6 +23,28 @@ test('Wayland refresh updates native screen metadata without disturbing the edit
   const preview = page.getByTestId('main-preview')
   await expect(preview).toHaveAttribute('data-backend', 'webgpu-hdr', { timeout: 90000 })
   await expect(preview).toHaveAttribute('data-editing', 'ready', { timeout: 60000 })
+  const nativeWindow = await app.browserWindow(page)
+  const nativeFocus = () =>
+    nativeWindow.evaluate((window) => ({
+      window: window.isFocused(),
+      contents: window.webContents.isFocused(),
+    }))
+  const pressNativeKey = (
+    keyCode: string,
+    modifiers: Electron.KeyboardInputEvent['modifiers'] = [],
+  ) =>
+    nativeWindow.evaluate(
+      (window, { keyCode, modifiers }) => {
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+      },
+      { keyCode, modifiers },
+    )
+  await nativeWindow.evaluate((window) => {
+    window.focus()
+    window.webContents.focus()
+  })
+  await expect.poll(nativeFocus).toEqual({ window: true, contents: true })
   await preview.focus()
   await page.keyboard.press('1')
   await expect(page.getByTestId('preview-viewport')).toHaveAttribute('data-scale', '1')
@@ -49,6 +71,7 @@ test('Wayland refresh updates native screen metadata without disturbing the edit
     return observations
   })
   await expect.poll(() => calls.evaluate((value) => value.count)).toBeGreaterThanOrEqual(3)
+  expect(await nativeFocus()).toEqual({ window: true, contents: true })
   await expect(exposure).toBeFocused()
   await expect(page.getByTestId('preview-viewport')).toHaveAttribute('data-scale', '1')
   expect(await retained.evaluate((canvas) => canvas.isConnected)).toBe(true)
@@ -56,6 +79,48 @@ test('Wayland refresh updates native screen metadata without disturbing the edit
   const after = await page.evaluate(() => window.luma.getPreviewDiagnostics())
   expect(after.presentation).toEqual(before.presentation)
   expect(await currentScreen()).toEqual(initial)
+  // CDP keyboard input can bypass missing native focus. Exercise Electron's
+  // native input route after refresh, including field and console exclusions.
+  await exposure.fill('12')
+  await pressNativeKey('Home')
+  await pressNativeKey('Delete')
+  await expect(exposure).toHaveValue('2')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await pressNativeKey('Escape')
+  await expect(exposure).toHaveValue('0.00')
+  await pressNativeKey('Tab')
+  await expect(exposure).not.toBeFocused()
+  await pressNativeKey('Tab', ['shift'])
+  await expect(exposure).toBeFocused()
+  await preview.focus()
+  const beforeDelete = await calls.evaluate((value) => value.count)
+  await expect
+    .poll(() => calls.evaluate((value) => value.count))
+    .toBeGreaterThanOrEqual(beforeDelete + 5)
+  expect(await nativeFocus()).toEqual({ window: true, contents: true })
+  await expect(preview).toBeFocused()
+  await pressNativeKey('Delete')
+  await expect(page.getByRole('dialog')).toContainText('Delete photo?')
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+  await pressNativeKey('Escape')
+  await expect(preview).toBeFocused()
+  await pressNativeKey('Tab')
+  await expect(preview).not.toBeFocused()
+  await page.getByTestId('console-toggle').click()
+  const consoleInput = page.getByRole('textbox', {
+    name: 'Agent console output, disconnected and read only',
+  })
+  await consoleInput.focus()
+  const beforeConsole = await calls.evaluate((value) => value.count)
+  await expect
+    .poll(() => calls.evaluate((value) => value.count))
+    .toBeGreaterThanOrEqual(beforeConsole + 2)
+  expect(await nativeFocus()).toEqual({ window: true, contents: true })
+  await expect(consoleInput).toBeFocused()
+  await pressNativeKey('Delete')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect((await page.evaluate(() => window.luma.listPhotos())).total).toBe(1)
+  await page.getByTestId('console-toggle').click()
   const viewport = page.getByTestId('preview-viewport')
   const box = (await viewport.boundingBox())!
   const pointer = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
@@ -80,6 +145,26 @@ test('Wayland refresh updates native screen metadata without disturbing the edit
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide())
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show())
   await expect.poll(currentScreen).toEqual(initial)
+  const otherWindow = await app.evaluateHandle(async ({ BrowserWindow }) => {
+    const window = new BrowserWindow({ width: 320, height: 200, show: false })
+    await window.loadURL('data:text/html,<title>Focus witness</title>Another window')
+    window.show()
+    return window
+  })
+  try {
+    await expect.poll(() => otherWindow.evaluate((window) => window.isFocused())).toBe(true)
+    await expect.poll(nativeFocus).toMatchObject({ window: false })
+    const beforeBackground = await calls.evaluate((value) => value.count)
+    await expect
+      .poll(() => calls.evaluate((value) => value.count))
+      .toBeGreaterThanOrEqual(beforeBackground + 3)
+    expect(await nativeFocus()).toEqual({ window: false, contents: false })
+    expect(await otherWindow.evaluate((window) => window.isFocused())).toBe(true)
+    expect(await currentScreen()).toEqual(initial)
+  } finally {
+    await otherWindow.evaluate((window) => window.destroy())
+    await otherWindow.dispose()
+  }
   await info.attach('native-current-screen', {
     body: JSON.stringify(initial),
     contentType: 'application/json',

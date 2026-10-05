@@ -12,9 +12,9 @@ Legacy processing retains RGBA8 sRGB output. The separate experimental HDR path 
 
 ## Workspace feedback backlog
 
-Open tasks from user feedback. Numbers preserve the reported order; the Delete issue still needs reproduction.
+Tasks from user feedback. Numbers preserve the reported order.
 
-- [ ] **1. Bug — Delete key does nothing with a photo selected.** Reproduce and fix the shortcut so it opens the existing deletion confirmation for the selected photos. Preserve text-field and console keyboard behavior, pending range selection, and system Trash handling.
+- [x] **1. Bug — Delete key does nothing with a photo selected.** Fixed native keyboard focus loss during the Electron 44.3.0 Wayland display refresh. Delete opens the existing confirmation and Tab moves focus after repeated refreshes. Text fields, console shortcuts, selection and system Trash retain their existing behavior. See [focus restoration and local acceptance](../hdr-processing.md#wayland-keyboard-focus).
 - [ ] **2. Improvement — Zoom and pan in Merge to HDR review.** Support pointer-centered wheel zoom, dragging, Fit, 100%, and scoped keyboard controls consistently with the normal preview. Use the review image's actual dimensions when showing its zoom percentage.
 - [ ] **3. Improvement — Collapse merge sources behind the result.** Show the merged photo as the cover of a stack, with an accessible icon and source count to expand or collapse its originals. Keep originals available for individual browsing and editing, and retain the grouping across restarts. Collapsing sources never deletes them.
 - [ ] **4. Feasibility — Automatically group a capture sequence.** Investigate reliable camera metadata for photographs taken during one continuous-shutter or BRK sequence. Reuse the expandable stack from item 3; allow manual grouping and ungrouping when sequence identity is missing or ambiguous. Grouping does not automatically merge photos.

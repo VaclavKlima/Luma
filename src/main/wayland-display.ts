@@ -1,5 +1,33 @@
 import type { BrowserWindow, WebContents } from 'electron'
 
+type DisplayRefreshContents = WebContents & {
+  setEmbedder?: (embedder: WebContents) => void
+}
+
+export function refreshWaylandDisplay(window: BrowserWindow): void {
+  if (window.isDestroyed() || !window.isVisible() || window.isMinimized()) return
+  const contents = window.webContents as DisplayRefreshContents
+  if (
+    contents.isDestroyed() ||
+    contents.isLoadingMainFrame() ||
+    typeof contents.setEmbedder !== 'function'
+  )
+    return
+
+  const wasFocused = window.isFocused() && contents.isFocused()
+  contents.setEmbedder(contents)
+  // WasHidden/WasShown can clear native view focus while leaving the window active.
+  // Restore only that view's previous focus, preserving the focused DOM control.
+  if (
+    wasFocused &&
+    !window.isDestroyed() &&
+    !contents.isDestroyed() &&
+    window.isFocused() &&
+    !contents.isFocused()
+  )
+    contents.focus()
+}
+
 /** Work around stale ScreenInfos in Electron 44.3.0 on Wayland. */
 export function installWaylandDisplayRefresh(window: BrowserWindow): void {
   if (
@@ -14,21 +42,11 @@ export function installWaylandDisplayRefresh(window: BrowserWindow): void {
   // synchronously calls WasHidden/WasShown, refreshing native ScreenInfos without
   // reloading, remapping the Wayland surface, or emulating a different display.
   // Recheck this workaround when upgrading Electron; see docs/hdr-processing.md.
-  const contents = window.webContents as WebContents & {
-    setEmbedder?: (embedder: WebContents) => void
-  }
+  const contents = window.webContents as DisplayRefreshContents
   if (typeof contents.setEmbedder !== 'function') return
   const refresh = () => {
-    if (
-      window.isDestroyed() ||
-      !window.isVisible() ||
-      window.isMinimized() ||
-      contents.isDestroyed() ||
-      contents.isLoadingMainFrame()
-    )
-      return
     try {
-      contents.setEmbedder!(contents)
+      refreshWaylandDisplay(window)
     } catch (error) {
       clearInterval(timer)
       console.warn('Could not refresh the Wayland display:', error)

@@ -29,6 +29,7 @@ const definitions: Suite[] = [
   { file: 'hdr-raw', group: 'raw-gpu', scopes: ['preview', 'adjustments'] },
   { file: 'hdr-editor-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'adjustments', 'mcp'] },
   { file: 'hdr-display', group: 'node', scopes: ['preview'] },
+  { file: 'wayland-display', group: 'node', scopes: ['ui', 'preview'] },
   { file: 'hdr-diagnostic-ui', group: 'electron', scopes: ['ui', 'preview'] },
   ...['white-balance', 'statistics', 'contrast', 'highlights', 'tonal-adjustments', 'edits'].map(
     (file) => ({
