@@ -99,6 +99,10 @@ On October 5, 2026, native tracing reproduced the display refresh clearing WebCo
 
 The user confirmed physical Delete after a five-second wait, Tab navigation, focus remaining with another application, and monitor/headroom updates in a verified temporary `dev:mcp` profile. Only the licensed Sony fixture was imported, and Trash was isolated inside that profile. Native focus and renderer observations are retained in `artifacts/verification/2026-10-05T15-50-26.519Z-wayland-focus-acceptance-eXzXzo/`; the development processes were stopped and the profile removed. This acceptance covers the local Linux/Wayland setup. Windows/macOS and physical HDR luminance remain unverified.
 
+On October 6, 2026, held preview drags reproduced another consequence of `WasHidden`: each timer tick released pointer lock even when native focus was restored. The refresh now observes mouse-button presses in the main process through [before-mouse-event](https://www.electronjs.org/docs/latest/api/web-contents#event-before-mouse-event) and defers screen-information refresh until release. A view-only blur preserves the held-button guard while the owner window remains active. Window deactivation, hiding, minimization, a new main-frame navigation, or renderer loss clears unfinished presses. The timer and its observers are removed on close or refresh failure. Monitor updates resume on the next idle tick; the pinned runtime gate and focus-restoration rules remain in place.
+
+The shared main/merge preview regression holds a locked drag over two timer ticks, starts another near the next tick, verifies continued relative motion and normal release/Escape/blur cleanup, and checks that refreshes resume. The HDR editor case also checks deferred refresh during a drag and subsequent native monitor, focus and GPU presentation behavior. These checks use isolated profiles and do not certify other platforms or physical HDR luminance.
+
 ## References and licensing
 
 - [Chromium HDR canvas path](https://developer.chrome.com/blog/new-in-webgpu-129): float presentation and extended tone mapping.

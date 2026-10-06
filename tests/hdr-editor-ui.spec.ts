@@ -126,15 +126,18 @@ test('Wayland refresh updates native screen metadata without disturbing the edit
   const pointer = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
   await page.mouse.move(pointer.x, pointer.y)
   await page.mouse.down()
+  await expect.poll(() => viewport.evaluate((el) => document.pointerLockElement === el)).toBe(true)
   const beforeDrag = await calls.evaluate((value) => value.count)
-  await expect
-    .poll(() => calls.evaluate((value) => value.count))
-    .toBeGreaterThanOrEqual(beforeDrag + 2)
-  await expect(viewport).toHaveCSS('cursor', 'grabbing')
+  await page.waitForTimeout(2200)
+  expect(await calls.evaluate((value) => value.count)).toBe(beforeDrag)
+  await expect(viewport).toHaveCSS('cursor', 'none')
   await page.mouse.move(pointer.x + 40, pointer.y + 20)
   await expect(viewport).toHaveAttribute('data-pan-x', '40')
   await page.mouse.up()
-  await expect(viewport).not.toHaveCSS('cursor', 'grabbing')
+  await expect(viewport).not.toHaveCSS('cursor', 'none')
+  await expect
+    .poll(() => calls.evaluate((value) => value.count))
+    .toBeGreaterThanOrEqual(beforeDrag + 2)
   // A new renderer takes a fresh native ScreenInfos snapshot. It must agree with
   // the running renderer; no particular monitor name or HDR capability is assumed.
   await page.reload()
