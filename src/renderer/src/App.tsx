@@ -1,5 +1,6 @@
 import { MergeDialog } from './components/MergeDialog'
 import type { MergeMode } from '../../shared/merge'
+import type { StackSummary } from '../../shared/stacks'
 import { DisplayDetails } from './components/DisplayDetails'
 import { useDisplayState } from './hooks/useDisplayState'
 import type { PreviewPreference } from '../../shared/hdr-display'
@@ -47,7 +48,6 @@ export function App() {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const library = useLibrary(setError)
   const {
-    photos,
     total,
     offset,
     position,
@@ -69,6 +69,11 @@ export function App() {
     x: number
     y: number
     targets: PhotoReference[]
+    stack: StackSummary | null
+    photoId: string | null
+    revision: number
+    canGroup: boolean
+    busy: boolean
   } | null>(null)
   const actionOrigin = useRef<HTMLElement | null>(null)
   const restoreFocus = useCallback(() => {
@@ -131,10 +136,10 @@ export function App() {
   function showContextMenu(photo: Photo, element: HTMLElement, x: number, y: number) {
     actionOrigin.current = element
     setTasksOpen(false)
-    void library.contextSelect(photo).then(
-      (targets) => setContextMenu({ x, y, targets }),
-      (error) => setError(String(error)),
-    )
+    void library
+      .contextSelect(photo)
+      .then((targets) => loadActions(x, y, targets, photo.id))
+      .catch((error) => setError(String(error)))
   }
 
   const refreshTasks = useCallback(async () => {
@@ -187,9 +192,64 @@ export function App() {
     actionOrigin.current = element
     const box = element.getBoundingClientRect()
     try {
-      setContextMenu({ x: box.left, y: box.bottom + 4, targets: await getSelection() })
+      await loadActions(box.left, box.bottom + 4, await getSelection(), photo?.id ?? null)
     } catch (error) {
       setError(String(error))
+    }
+  }
+  async function loadActions(
+    x: number,
+    y: number,
+    targets: PhotoReference[],
+    photoId: string | null,
+  ) {
+    const [overview, stack, currentTasks, groups] = await Promise.all([
+      window.luma.listStacks(),
+      photoId ? window.luma.getPhotoStack(photoId) : Promise.resolve(null),
+      window.luma.listTasks(),
+      Promise.all(targets.map((p) => window.luma.getPhotoStack(p.id))),
+    ])
+    setContextMenu({
+      x,
+      y,
+      targets,
+      photoId,
+      stack,
+      revision: overview.revision,
+      canGroup: targets.length >= 2 && groups.every((s) => !s),
+      busy: currentTasks.some((t) => t.status === 'running' || t.status === 'cancelling'),
+    })
+  }
+  async function stackAction(action: 'group' | 'ungroup' | 'remove' | 'cover' | 'select' | 'scan') {
+    const menu = contextMenu
+    if (!menu) return
+    setContextMenu(null)
+    try {
+      const stack = menu.stack
+      if (action === 'group') {
+        const ids = menu.targets.map((p) => p.id)
+        await window.luma.groupPhotos(
+          ids,
+          menu.photoId && ids.includes(menu.photoId) ? menu.photoId : ids[0],
+          menu.revision,
+        )
+      } else if (action === 'scan') {
+        await window.luma.groupCaptureSequences()
+        await refreshTasks()
+        setTasksOpen(true)
+      } else if (stack) {
+        if (action === 'ungroup') await window.luma.ungroupStack(stack.id, stack.revision)
+        if (action === 'remove' && menu.photoId)
+          await window.luma.removeFromStack(menu.photoId, stack.revision)
+        if (action === 'cover' && menu.photoId)
+          await window.luma.setStackCover(stack.id, menu.photoId, stack.revision)
+        if (action === 'select') await library.selectStack(stack.id)
+      }
+      await refresh()
+    } catch (error) {
+      setError(String(error))
+    } finally {
+      restoreFocus()
     }
   }
   function openMerge(mode: MergeMode) {
@@ -198,10 +258,10 @@ export function App() {
     setContextMenu(null)
   }
   async function openResult(id: string) {
-    const result = await window.luma.locatePhoto(id)
+    const result = await window.luma.locateGalleryPhoto(id)
     if (result) {
       await changePage(result.offset)
-      await select(result.photos[result.index - result.offset])
+      await select(result.photo)
       setTasksOpen(false)
     }
   }
@@ -259,8 +319,20 @@ export function App() {
 
       <div className={styles.editor} data-testid="workspace">
         <Library
-          photos={photos}
+          entries={library.entries}
           total={total}
+          storedTotal={library.storedTotal}
+          hiddenSelectedIds={library.hiddenSelectedIds}
+          hiddenActiveCover={library.hiddenActiveCover}
+          onExpand={(stack) => {
+            void window.luma
+              .setStackExpanded(stack.id, !stack.expanded, stack.revision)
+              .then(() => refresh())
+              .catch((error) => {
+                setError(String(error))
+                void refresh()
+              })
+          }}
           offset={offset}
           onPage={(start) => {
             void changePage(start).catch((error) => setError(String(error)))
@@ -442,6 +514,11 @@ export function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           count={contextMenu.targets.length}
+          stack={contextMenu.stack}
+          canGroup={contextMenu.canGroup}
+          canSetCover={contextMenu.photoId !== contextMenu.stack?.coverId}
+          busy={contextMenu.busy}
+          onStackAction={(action) => void stackAction(action)}
           onClose={closeContextMenu}
           onDelete={() => void requestDeletion(contextMenu.targets)}
           onMerge={openMerge}

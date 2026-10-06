@@ -389,6 +389,13 @@ for (const boundary of ['staged', 'journaled', 'published', 'committed'] as cons
         )
       if (boundary !== 'staged') {
         const result = library.list().photos.find((p) => p.assetKind === 'derived')!
+        expect(library.getPhotoStack(result.id)).toMatchObject({
+          coverId: result.id,
+          count: 3,
+          expanded: false,
+          origin: 'merge',
+        })
+        expect(library.listGallery()).toMatchObject({ total: 1, storedTotal: 3 })
         expect((await library.getMergeProvenance(result.id)).manifest.asset.sha256).toBe(
           f.result.asset.sha256,
         )

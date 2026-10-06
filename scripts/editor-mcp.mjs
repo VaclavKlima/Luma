@@ -31,6 +31,80 @@ const mergeSettings = schema({
 const reviewId = { type: 'string' }
 const tools = [
   {
+    name: 'luma_list_stacks',
+    description: 'Read stack summaries and the gallery revision for manual grouping.',
+    inputSchema: schema({}),
+  },
+  {
+    name: 'luma_get_photo_stack',
+    description: 'Read a photo’s stack and its current revision.',
+    inputSchema: schema({ photoId }),
+  },
+  {
+    name: 'luma_get_stack_members',
+    description: 'Read 60 ordered stack members, cover first.',
+    inputSchema: schema({ stackId: { type: 'string' }, offset: { type: 'integer', minimum: 0 } }, [
+      'stackId',
+    ]),
+  },
+  {
+    name: 'luma_group_photos',
+    description:
+      'Group ungrouped photos with a selected cover. expectedRevision comes from list_stacks.',
+    inputSchema: schema({
+      ids: { type: 'array', items: photoId, minItems: 2, uniqueItems: true },
+      coverId: photoId,
+      expectedRevision,
+    }),
+  },
+  {
+    name: 'luma_ungroup_stack',
+    description:
+      'Ungroup a stack, remembering this manual choice for automatic scans. Requires the stack revision.',
+    inputSchema: schema({ stackId: { type: 'string' }, expectedRevision }),
+  },
+  {
+    name: 'luma_remove_from_stack',
+    description: 'Remove one member without deleting its photo. Requires the stack revision.',
+    inputSchema: schema({ photoId, expectedRevision }),
+  },
+  {
+    name: 'luma_set_stack_cover',
+    description: 'Choose a member as cover using the stack revision.',
+    inputSchema: schema({ stackId: { type: 'string' }, photoId, expectedRevision }),
+  },
+  {
+    name: 'luma_set_stack_expanded',
+    description:
+      'Persist inline expansion using the stack revision; preserves selections and active photo.',
+    inputSchema: schema({
+      stackId: { type: 'string' },
+      expanded: { type: 'boolean' },
+      expectedRevision,
+    }),
+  },
+  {
+    name: 'luma_list_gallery',
+    description: 'Read 60 visible photo rows, with parent stack and stored-photo totals.',
+    inputSchema: schema({ offset: { type: 'integer', minimum: 0 } }, []),
+  },
+  {
+    name: 'luma_locate_gallery_photo',
+    description: 'Locate or navigate a visible row; hidden photos use their cover position.',
+    inputSchema: schema({ photoId, direction: { type: 'integer', enum: [-1, 0, 1] } }, ['photoId']),
+  },
+  {
+    name: 'luma_get_gallery_range',
+    description: 'Read visible photos between range boundaries; hidden anchors use their covers.',
+    inputSchema: schema({ fromId: photoId, toId: photoId }),
+  },
+  {
+    name: 'luma_group_capture_sequences',
+    description:
+      'Start a cancellable metadata-only scan of managed originals for verified Sony ZV-1A ARW continuous captures. BRK remains unverified.',
+    inputSchema: schema({}),
+  },
+  {
     name: 'luma_get_active_merge_review',
     description: 'Read the active merge review without starting or recomputing processing.',
     inputSchema: schema({}),

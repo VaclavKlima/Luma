@@ -478,6 +478,55 @@ app
       trusted(event)
       return library!.locate(id, direction)
     })
+    ipcMain.handle('stacks:list', (event) => {
+      trusted(event)
+      return library!.listStacks()
+    })
+    ipcMain.handle('stacks:photo', (event, id: string) => {
+      trusted(event)
+      return library!.getPhotoStack(id)
+    })
+    ipcMain.handle('stacks:members', (event, id: string, offset: number) => {
+      trusted(event)
+      return library!.getStackMembers(id, offset)
+    })
+    ipcMain.handle('stacks:group', (event, ids: string[], coverId: string, revision: number) => {
+      trusted(event)
+      return library!.groupPhotos(ids, coverId, revision)
+    })
+    ipcMain.handle('stacks:ungroup', (event, id: string, revision: number) => {
+      trusted(event)
+      return library!.ungroupStack(id, revision)
+    })
+    ipcMain.handle('stacks:remove', (event, id: string, revision: number) => {
+      trusted(event)
+      return library!.removeFromStack(id, revision)
+    })
+    ipcMain.handle('stacks:cover', (event, id: string, photoId: string, revision: number) => {
+      trusted(event)
+      return library!.setStackCover(id, photoId, revision)
+    })
+    ipcMain.handle('stacks:expand', (event, id: string, expanded: boolean, revision: number) => {
+      trusted(event)
+      return library!.setStackExpanded(id, expanded, revision)
+    })
+    ipcMain.handle('stacks:capture-scan', (event) => {
+      trusted(event)
+      if (picking) throw new Error('Close the file picker first.')
+      return library!.groupCaptureSequences()
+    })
+    ipcMain.handle('gallery:list', (event, offset: number, selectedIds: string[]) => {
+      trusted(event)
+      return library!.listGallery(offset, selectedIds)
+    })
+    ipcMain.handle('gallery:locate', (event, id: string, direction: -1 | 0 | 1) => {
+      trusted(event)
+      return library!.locateGalleryPhoto(id, direction)
+    })
+    ipcMain.handle('gallery:range', (event, from: string, to: string) => {
+      trusted(event)
+      return library!.getGalleryRange(from, to)
+    })
     ipcMain.handle('library:range', (event, from: string, to: string) => {
       trusted(event)
       return library!.range(from, to)

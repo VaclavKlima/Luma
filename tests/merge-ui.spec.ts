@@ -22,13 +22,13 @@ test('shared Actions menu explains bounds and preserves pending right-click sele
     const handlers = (
         ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
       )._invokeHandlers,
-      original = handlers.get('library:range')!
+      original = handlers.get('gallery:range')!
     let release!: () => void
     const wait = new Promise<void>((resolve) => {
       release = resolve
     })
-    ipcMain.removeHandler('library:range')
-    ipcMain.handle('library:range', async (...args) => {
+    ipcMain.removeHandler('gallery:range')
+    ipcMain.handle('gallery:range', async (...args) => {
       await wait
       return original(...args)
     })
@@ -53,6 +53,7 @@ test('shared Actions menu explains bounds and preserves pending right-click sele
     w.setContentSize(1100, 700)
   })
   await page.getByRole('button', { name: 'Actions', exact: true }).click()
+  await expect(page.getByRole('menu')).toBeVisible()
   await page.keyboard.press('Home')
   await expect(page.getByRole('menuitem', { name: 'Merge to HDR…' })).toBeFocused()
   await page.keyboard.press('ArrowDown')

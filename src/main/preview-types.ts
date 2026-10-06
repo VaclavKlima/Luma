@@ -16,7 +16,7 @@ export type PreviewWorkerRequest =
   | { type: 'close' }
   | { type: 'release' }
   | {
-      type: 'process' | 'full' | 'metadata' | 'statistics'
+      type: 'process' | 'full' | 'metadata' | 'capture-metadata' | 'statistics'
       path: string
       output: string
       options?: ProcessingOptions
@@ -27,11 +27,17 @@ export type PreviewWorkerResponse =
   | {
       type: 'result'
       result:
-        PreviewResult | FullPreviewResult | ProcessingMetadata | ImageStatistics | HdrStatistics
+        | PreviewResult
+        | FullPreviewResult
+        | ProcessingMetadata
+        | ImageStatistics
+        | HdrStatistics
+        | import('../shared/capture-sequence').CaptureMetadata
     }
   | { type: 'error'; error: string }
 
 export interface PreviewResult {
+  captureMetadata?: import('../shared/capture-sequence').CaptureMetadata
   processing?: ProcessingMetadata
   metadata: PhotoMetadata
   source: Photo['previewSource']

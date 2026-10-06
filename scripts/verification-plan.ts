@@ -14,6 +14,11 @@ interface Suite {
   family?: BenchmarkFamily
 }
 const definitions: Suite[] = [
+  { file: 'stack-model', group: 'node', scopes: ['library'] },
+  { file: 'capture-sequence', group: 'node', scopes: ['library'] },
+  { file: 'stack-library', group: 'service', scopes: ['library'] },
+  { file: 'capture-metadata', group: 'service', scopes: ['library'] },
+  { file: 'stack-ui', group: 'electron', scopes: ['library', 'ui', 'mcp'] },
   { file: 'merge-raw-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'library', 'mcp'] },
   { file: 'merge-ui', group: 'electron', scopes: ['ui', 'library', 'mcp'] },
   // Pointer-lock interaction owns the desktop cursor and must run in one window at a time.

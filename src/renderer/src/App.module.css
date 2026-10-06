@@ -204,6 +204,59 @@
   flex-direction: column;
   gap: 12px;
 }
+.photoRow {
+  position: relative;
+  min-width: 0;
+}
+.stackRow {
+  border-left: 1px solid #565652;
+  padding-left: 7px;
+}
+.stackMember {
+  margin-left: 12px;
+  border-left-color: #41413f;
+}
+.stackExpand {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 32px;
+  min-height: 25px;
+  padding: 3px 5px;
+  border: 1px solid #686863;
+  border-radius: 3px;
+  background: #202020ed;
+  color: var(--text);
+  font-size: 10px;
+}
+.stackExpand:hover {
+  background: #41413f;
+}
+.hiddenSelection,
+.stackContinuation {
+  margin: 0 12px 10px;
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.hiddenSelection summary {
+  cursor: pointer;
+}
+.hiddenSelection ul {
+  padding-left: 15px;
+}
+.stackContinuation {
+  margin: 0 3px 4px;
+}
+.recipeCount {
+  display: block;
+  padding: 0 3px 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
 .photoCard {
   width: 100%;
   border: 1px solid transparent;

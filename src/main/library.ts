@@ -1,4 +1,6 @@
 import { MergeReviews } from './merge/reviews'
+import { StackStore } from './stacks'
+import { CAPTURE_METADATA_VERSION } from '../shared/capture-sequence'
 import { durableJson, recoverMerges, syncDirectory, verifyMaster } from './merge/store'
 import {
   MERGE_VERSION,
@@ -76,6 +78,7 @@ export class PhotoLibrary {
   readonly fullPreviews: FullPreviews
   readonly merges: MergeReviews
   private db!: DatabaseSync
+  private stacks!: StackStore
   private lensTail: Promise<unknown> = Promise.resolve()
   private metadataTail: Promise<unknown> = Promise.resolve()
   private removals!: RemovalStore
@@ -107,6 +110,10 @@ export class PhotoLibrary {
     private mergeBoundary?: (
       boundary: 'staged' | 'journaled' | 'published' | 'committed',
     ) => Promise<void>,
+    private captureProcessor: Pick<
+      PreviewProcess,
+      'inspectCapture' | 'close'
+    > = new PreviewProcess(),
   ) {
     this.merges = new MergeReviews(
       root,
@@ -161,7 +168,8 @@ export class PhotoLibrary {
     this.db = new DatabaseSync(join(this.root, 'catalog.sqlite'))
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     const version = this.db.prepare('PRAGMA user_version').get() as { user_version: number }
-    if (version.user_version > 10) throw new Error('This library requires a newer version of Luma.')
+    if (version.user_version > 11) throw new Error('This library requires a newer version of Luma.')
+    this.stacks = new StackStore(this.db)
     this.db.exec(
       'BEGIN; CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, imported_at TEXT NOT NULL, photo TEXT NOT NULL); CREATE TABLE IF NOT EXISTS removals (id TEXT PRIMARY KEY, staged TEXT NOT NULL); CREATE TABLE IF NOT EXISTS processing (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_processing AFTER DELETE ON photos BEGIN DELETE FROM processing WHERE id = old.id; END; CREATE TABLE IF NOT EXISTS edits (id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_edits AFTER DELETE ON photos BEGIN DELETE FROM edits WHERE id = old.id; END;',
     )
@@ -227,12 +235,16 @@ export class PhotoLibrary {
       this.db.exec(
         'CREATE TABLE IF NOT EXISTS merge_publications (id TEXT PRIMARY KEY, manifest_sha256 TEXT NOT NULL); CREATE TABLE IF NOT EXISTS derived_assets (id TEXT PRIMARY KEY, manifest TEXT NOT NULL); CREATE TRIGGER IF NOT EXISTS remove_derived AFTER DELETE ON photos BEGIN DELETE FROM derived_assets WHERE id = old.id; END;',
       )
-      this.db.exec('PRAGMA user_version = 10; COMMIT;')
+      this.stacks.migrate()
+      if (version.user_version < 11) this.stacks.backfillMerges()
+      this.db.exec('PRAGMA user_version = 11; COMMIT;')
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error
     }
-    this.removals = new RemovalStore(this.root, this.db, this.trash)
+    this.removals = new RemovalStore(this.root, this.db, this.trash, (id) =>
+      this.stacks.repairRemoval(id),
+    )
     await this.removals.recover()
     await recoverMerges(this.root, this.db, (manifest) => this.commitMerge(manifest))
     await rm(join(this.root, 'merge-reviews'), { recursive: true, force: true })
@@ -567,6 +579,148 @@ export class PhotoLibrary {
     return { photos: rows.map((row) => JSON.parse(row.photo) as Photo), total: count.total }
   }
 
+  listStacks() {
+    return this.stacks.overview()
+  }
+  getPhotoStack(id: string) {
+    return this.stacks.forPhoto(id)
+  }
+  getStackMembers(id: string, offset = 0) {
+    return this.stacks.members(id, offset)
+  }
+  listGallery(offset = 0, selectedIds: string[] = []) {
+    return this.stacks.gallery(offset, selectedIds)
+  }
+  locateGalleryPhoto(id: string, direction: -1 | 0 | 1 = 0) {
+    if (typeof id !== 'string' || !hashPattern.test(id) || ![-1, 0, 1].includes(direction))
+      throw new Error('Invalid photo navigation.')
+    if (!this.find(id)) return null
+    return this.stacks.locate(id, direction)
+  }
+  getGalleryRange(from: string, to: string) {
+    return this.stacks.range(from, to)
+  }
+  private mutateStack<T>(work: () => T): T {
+    if (
+      this.closed ||
+      this.replacingSession ||
+      this.hasActiveTask() ||
+      this.session?.phase === 'scanning'
+    )
+      throw new Error('Finish or cancel the current library operation first.')
+    this.assertRecovered()
+    const result = work()
+    this.changed(undefined, true)
+    return result
+  }
+  groupPhotos(ids: string[], coverId: string, revision: number) {
+    return this.mutateStack(() => this.stacks.group(ids, coverId, revision))
+  }
+  ungroupStack(id: string, revision: number) {
+    return this.mutateStack(() => this.stacks.ungroup(id, revision))
+  }
+  removeFromStack(id: string, revision: number) {
+    return this.mutateStack(() => this.stacks.remove(id, revision))
+  }
+  setStackCover(id: string, photoId: string, revision: number) {
+    return this.mutateStack(() => this.stacks.setCover(id, photoId, revision))
+  }
+  setStackExpanded(id: string, expanded: boolean, revision: number) {
+    // Expansion is safe while a task imports or inspects originals; membership stays fixed.
+    if (this.closed) throw new Error('This library is closed.')
+    const result = this.stacks.setExpanded(id, expanded, revision)
+    this.changed(undefined, true)
+    return result
+  }
+
+  groupCaptureSequences(): string {
+    if (
+      this.closed ||
+      this.replacingSession ||
+      this.hasActiveTask() ||
+      this.session?.phase === 'scanning'
+    )
+      throw new Error('Finish or cancel the current library operation first.')
+    this.assertRecovered()
+    const photos = (
+      this.db
+        .prepare(
+          "SELECT photo FROM photos WHERE COALESCE(json_extract(photo, '$.assetKind'), 'original') != 'derived' ORDER BY imported_at, rowid",
+        )
+        .all() as { photo: string }[]
+    ).map((r) => JSON.parse(r.photo) as Photo)
+    const id = randomUUID()
+    const task = {
+      snapshot: {
+        id,
+        kind: 'capture-grouping',
+        title: 'Grouping capture sequences',
+        status: 'running',
+        progress: { completed: 0, total: photos.length, unit: 'items' },
+        items: { completed: 0, total: photos.length, label: 'photos inspected' },
+        errorCount: 0,
+      } as BackgroundTask,
+      errors: [] as TaskErrorPage['errors'],
+      abort: new AbortController(),
+      work: Promise.resolve(),
+    }
+    this.tasks.set(id, task)
+    this.changed()
+    task.work = (async () => {
+      try {
+        for (const photo of photos) {
+          task.abort.signal.throwIfAborted()
+          task.snapshot.detail = photo.filename
+          this.changed()
+          try {
+            if (this.stacks.capture(photo.id)?.version !== CAPTURE_METADATA_VERSION) {
+              const path = join(
+                this.root,
+                'originals',
+                photo.id,
+                `original${extname(photo.filename).toLowerCase()}`,
+              )
+              const metadata = await this.captureProcessor.inspectCapture(path, task.abort.signal)
+              task.abort.signal.throwIfAborted()
+              this.stacks.putCapture(photo.id, metadata)
+            }
+          } catch (error) {
+            if (task.abort.signal.aborted) throw error
+            task.errors.push({ filename: photo.filename, message: errorMessage(error) })
+          }
+          task.snapshot.progress!.completed++
+          task.snapshot.items!.completed++
+          task.snapshot.errorCount = task.errors.length
+          this.changed()
+          // Yield even for cached metadata so cancellation can interrupt a long scan.
+          await new Promise<void>((resolve) => setImmediate(resolve))
+        }
+        task.abort.signal.throwIfAborted()
+        const count = this.stacks.reconcileCaptures()
+        task.snapshot.detail = `${count} ${count === 1 ? 'stack' : 'stacks'} created or extended`
+      } catch (error) {
+        if (!task.abort.signal.aborted)
+          task.errors.push({ filename: 'Library', message: errorMessage(error) })
+      } finally {
+        await this.captureProcessor.close()
+        task.snapshot.status = task.abort.signal.aborted
+          ? 'cancelled'
+          : task.errors.length
+            ? 'failed'
+            : 'completed'
+        task.snapshot.title = task.abort.signal.aborted
+          ? 'Capture grouping cancelled'
+          : task.errors.length
+            ? 'Capture grouping finished with errors'
+            : 'Capture grouping complete'
+        task.snapshot.errorCount = task.errors.length
+        task.snapshot.finishedAt = Date.now()
+        this.changed(undefined, true)
+      }
+    })()
+    return id
+  }
+
   locate(id: string, direction: -1 | 0 | 1 = 0): PhotoLocation | null {
     if (typeof id !== 'string' || ![-1, 0, 1].includes(direction))
       throw new Error('Invalid photo navigation.')
@@ -651,11 +805,22 @@ export class PhotoLibrary {
           task.snapshot.detail = photo.filename
           this.changed()
           try {
-            const neighbor = this.locate(photo.id, 1) ?? this.locate(photo.id, -1)
-            const replacementId = neighbor?.photos[neighbor.index - neighbor.offset]?.id
+            const stack = this.getPhotoStack(photo.id)
+            const cover = stack?.coverId
+            const survivor = stack
+              ? this.getStackMembers(stack.id).photos.find((p) => p.id !== photo.id)?.id
+              : undefined
+            const neighbor =
+              this.locateGalleryPhoto(photo.id, 1) ?? this.locateGalleryPhoto(photo.id, -1)
+            let replacementId = cover && cover !== photo.id ? cover : neighbor?.photo.id
             await this.fullPreviews.beginRemoval(photo.id)
             try {
               await this.removals.remove(photo.id)
+              // A surviving promoted cover occupies the deleted cover's gallery position.
+              replacementId =
+                this.listStacks().stacks.find((s) => s.id === stack?.id)?.coverId ??
+                survivor ??
+                replacementId
             } finally {
               await this.fullPreviews.endRemoval(photo.id, !this.find(photo.id))
             }
@@ -717,7 +882,9 @@ export class PhotoLibrary {
         ? 'Cancelling deletion…'
         : task.snapshot.kind === 'merge'
           ? 'Cancelling merge…'
-          : 'Cancelling import…'
+          : task.snapshot.kind === 'capture-grouping'
+            ? 'Cancelling capture grouping…'
+            : 'Cancelling import…'
     this.changed()
     if (task.abort) {
       task.abort.abort()
@@ -1004,6 +1171,7 @@ export class PhotoLibrary {
     s.task = (async () => {
       try {
         await this.commit(s)
+        if (!s.abort.signal.aborted && !task.errors.length) this.stacks.reconcileCaptures()
       } catch (error) {
         task.errors.push({ filename: s.source, message: errorMessage(error) })
       } finally {
@@ -1106,6 +1274,7 @@ export class PhotoLibrary {
                 revision: 0,
               }),
             )
+          if (c.preview.captureMetadata) this.stacks.putCapture(photo.id, c.preview.captureMetadata)
           this.db.exec('COMMIT')
         } catch (error) {
           this.db.exec('ROLLBACK')
@@ -1256,6 +1425,7 @@ export class PhotoLibrary {
         .prepare('INSERT OR IGNORE INTO processing (id, data) VALUES (?, ?)')
         .run(photo.id, JSON.stringify(options))
       this.ensureEdits(photo.id, options)
+      this.stacks.attachMerge(manifest)
       this.db.prepare('DELETE FROM merge_publications WHERE id = ?').run(photo.id)
       this.db.exec('COMMIT')
     } catch (error) {
@@ -1394,9 +1564,6 @@ export class PhotoLibrary {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
-    await this.metadataProcessor.close()
-    await this.metadataTail
-    await this.fullPreviews.close()
     if (this.notification) clearTimeout(this.notification)
     try {
       for (const [id, task] of this.tasks) {
@@ -1404,6 +1571,10 @@ export class PhotoLibrary {
           await this.cancelTask(id)
       }
       if (this.session) await this.dispose(this.session.id)
+      await this.captureProcessor.close()
+      await this.metadataProcessor.close()
+      await this.metadataTail
+      await this.fullPreviews.close()
       await this.merges.close()
     } finally {
       try {

@@ -55,6 +55,12 @@ export async function startEditorEndpoint(
         domain,
         target,
         targetGeneration,
+        stackId,
+        coverId,
+        expanded,
+        fromId,
+        toId,
+        direction,
       } = JSON.parse(body) as {
         domain?: import('../shared/hdr-statistics').HdrAnalysisDomain
         target?: 'sdr' | 'current'
@@ -70,9 +76,52 @@ export async function startEditorEndpoint(
         patch: EditPatch
         expectedRevision: number
         offset?: number
+        stackId: string
+        coverId: string
+        expanded: boolean
+        fromId: string
+        toId: string
+        direction?: -1 | 0 | 1
       }
       let result: unknown
       switch (operation) {
+        case 'luma_list_stacks':
+          result = library.listStacks()
+          break
+        case 'luma_get_photo_stack':
+          result = { stack: library.getPhotoStack(photoId) }
+          break
+        case 'luma_get_stack_members':
+          result = library.getStackMembers(stackId, offset)
+          break
+        case 'luma_group_photos':
+          result = library.groupPhotos(ids, coverId, expectedRevision)
+          break
+        case 'luma_ungroup_stack':
+          library.ungroupStack(stackId, expectedRevision)
+          result = { ungrouped: true }
+          break
+        case 'luma_remove_from_stack':
+          result = { stack: library.removeFromStack(photoId, expectedRevision) }
+          break
+        case 'luma_set_stack_cover':
+          result = library.setStackCover(stackId, photoId, expectedRevision)
+          break
+        case 'luma_set_stack_expanded':
+          result = library.setStackExpanded(stackId, expanded, expectedRevision)
+          break
+        case 'luma_list_gallery':
+          result = library.listGallery(offset)
+          break
+        case 'luma_locate_gallery_photo':
+          result = { location: library.locateGalleryPhoto(photoId, direction) }
+          break
+        case 'luma_get_gallery_range':
+          result = { photos: library.getGalleryRange(fromId, toId) }
+          break
+        case 'luma_group_capture_sequences':
+          result = { taskId: library.groupCaptureSequences() }
+          break
         case 'luma_get_active_merge_review':
           result = { review: library.getActiveMergeReview() }
           break

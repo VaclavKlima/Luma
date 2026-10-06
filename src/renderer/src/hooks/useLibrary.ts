@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import type { GalleryEntry } from '../../../shared/stacks'
 import {
   PAGE_SIZE,
   type LibraryEvent,
@@ -8,6 +9,11 @@ import {
 
 interface LibraryState {
   photos: Photo[]
+  entries: GalleryEntry[]
+  storedTotal: number
+  revision: number
+  hiddenSelectedIds: string[]
+  hiddenActiveCover: PhotoReference | null
   total: number
   offset: number
   position: number
@@ -24,6 +30,11 @@ export interface SelectionModifiers {
 export function useLibrary(onError: (error: string) => void) {
   const [state, setState] = useState<LibraryState>({
     photos: [],
+    entries: [],
+    storedTotal: 0,
+    revision: 0,
+    hiddenSelectedIds: [],
+    hiddenActiveCover: null,
     total: 0,
     offset: 0,
     position: 0,
@@ -52,21 +63,27 @@ export function useLibrary(onError: (error: string) => void) {
       try {
         const previous = current.current
         const id = previous.activeId ?? firstImportedId
-        const located = id ? await window.luma.locatePhoto(id) : null
+        const located = id ? await window.luma.locateGalleryPhoto(id) : null
         let pageOffset = previous.offset
-        let page = await window.luma.listPhotos(pageOffset)
+        let page = await window.luma.listGallery(pageOffset, [...previous.selected.keys()])
         if (pageOffset >= page.total && pageOffset > 0) {
           pageOffset = Math.max(0, Math.floor((page.total - 1) / PAGE_SIZE) * PAGE_SIZE)
-          page = await window.luma.listPhotos(pageOffset)
+          page = await window.luma.listGallery(pageOffset, [...previous.selected.keys()])
         }
         if (ticket !== request.current || refreshTicket !== refreshing.current) return
-        const photo = located
-          ? located.photos[located.index - located.offset]
-          : (page.photos[0] ?? null)
+        const photo = located ? located.photo : (page.entries[0]?.photo ?? null)
         const firstSelection = (!initialized.current || previous.total === 0) && photo !== null
         if (photo) initialized.current = true
         update({
-          photos: page.photos,
+          photos: page.entries.map((e) => e.photo),
+          entries: page.entries,
+          storedTotal: page.storedTotal,
+          revision: page.revision,
+          hiddenSelectedIds: page.hiddenSelectedIds,
+          hiddenActiveCover:
+            located && located.entries[located.index - located.offset].photo.id !== located.photo.id
+              ? (located.entries[located.index - located.offset].cover ?? null)
+              : null,
           total: page.total,
           offset: pageOffset,
           photo,
@@ -115,7 +132,7 @@ export function useLibrary(onError: (error: string) => void) {
           let selected: Map<string, PhotoReference>
           let anchor = previous.anchor
           if (modifiers.shift && anchor) {
-            const range = await window.luma.getPhotoRange(anchor, photo.id)
+            const range = await window.luma.getGalleryRange(anchor, photo.id)
             if (ticket !== request.current) return
             selected = new Map(modifiers.toggle ? previous.selected : [])
             for (const item of range) selected.set(item.id, item)
@@ -184,11 +201,16 @@ export function useLibrary(onError: (error: string) => void) {
       const ticket = ++request.current
       navigating.current = true
       try {
-        const result = await window.luma.locatePhoto(id, delta)
+        const result = await window.luma.locateGalleryPhoto(id, delta)
         if (!result || ticket !== request.current) return
-        const photo = result.photos[result.index - result.offset]
+        const photo = result.photo
         update({
-          photos: result.photos,
+          photos: result.entries.map((e) => e.photo),
+          entries: result.entries,
+          storedTotal: result.storedTotal,
+          revision: result.revision,
+          hiddenSelectedIds: [],
+          hiddenActiveCover: null,
           total: result.total,
           offset: result.offset,
           position: result.index,
@@ -214,9 +236,17 @@ export function useLibrary(onError: (error: string) => void) {
       const ticket = ++request.current
       navigating.current = true
       try {
-        const result = await window.luma.listPhotos(offset)
+        const result = await window.luma.listGallery(offset, [...current.current.selected.keys()])
         if (ticket === request.current)
-          update({ photos: result.photos, total: result.total, offset })
+          update({
+            photos: result.entries.map((e) => e.photo),
+            entries: result.entries,
+            storedTotal: result.storedTotal,
+            revision: result.revision,
+            hiddenSelectedIds: result.hiddenSelectedIds,
+            total: result.total,
+            offset,
+          })
       } catch (error) {
         onError(String(error))
       } finally {
@@ -229,5 +259,56 @@ export function useLibrary(onError: (error: string) => void) {
     [onError, refresh, update],
   )
 
-  return { ...state, refresh, onEvent, select, getSelection, contextSelect, navigate, changePage }
+  const selectStack = useCallback(
+    (stackId: string) => {
+      const previousWork = pendingSelection.current
+      const work = (async () => {
+        await previousWork
+        const ticket = ++request.current
+        navigating.current = true
+        try {
+          const selected = new Map<string, PhotoReference>()
+          let offset = 0
+          let total = 0
+          let revision: number | undefined
+          do {
+            const page = await window.luma.getStackMembers(stackId, offset)
+            total = page.total
+            if (revision !== undefined && revision !== page.stack.revision)
+              throw new Error('The stack changed. Select it again.')
+            revision = page.stack.revision
+            for (const photo of page.photos)
+              selected.set(photo.id, { id: photo.id, filename: photo.filename })
+            offset += page.photos.length
+            if (offset >= page.total) break
+          } while (offset < total)
+          if (ticket === request.current) update({ selected })
+        } catch (error) {
+          selectionError.current = error
+          throw error
+        } finally {
+          if (ticket === request.current) {
+            navigating.current = false
+            void refresh()
+          }
+        }
+      })()
+      selectionError.current = null
+      pendingSelection.current = work.catch(() => {})
+      return work
+    },
+    [refresh, update],
+  )
+
+  return {
+    ...state,
+    refresh,
+    onEvent,
+    select,
+    getSelection,
+    contextSelect,
+    navigate,
+    changePage,
+    selectStack,
+  }
 }

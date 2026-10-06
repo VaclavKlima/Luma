@@ -8,6 +8,22 @@ async function mergeResult<T>(response: Promise<{ result: T; error?: MergeFailur
   return value.result
 }
 const api: LumaApi = {
+  listStacks: () => ipcRenderer.invoke('stacks:list'),
+  getPhotoStack: (id) => ipcRenderer.invoke('stacks:photo', id),
+  getStackMembers: (id, offset = 0) => ipcRenderer.invoke('stacks:members', id, offset),
+  groupPhotos: (ids, coverId, revision) =>
+    ipcRenderer.invoke('stacks:group', ids, coverId, revision),
+  ungroupStack: (id, revision) => ipcRenderer.invoke('stacks:ungroup', id, revision),
+  removeFromStack: (id, revision) => ipcRenderer.invoke('stacks:remove', id, revision),
+  setStackCover: (id, photoId, revision) =>
+    ipcRenderer.invoke('stacks:cover', id, photoId, revision),
+  setStackExpanded: (id, expanded, revision) =>
+    ipcRenderer.invoke('stacks:expand', id, expanded, revision),
+  listGallery: (offset = 0, selectedIds = []) =>
+    ipcRenderer.invoke('gallery:list', offset, selectedIds),
+  locateGalleryPhoto: (id, direction = 0) => ipcRenderer.invoke('gallery:locate', id, direction),
+  getGalleryRange: (from, to) => ipcRenderer.invoke('gallery:range', from, to),
+  groupCaptureSequences: () => ipcRenderer.invoke('stacks:capture-scan'),
   getActiveMergeReview: () => mergeResult(ipcRenderer.invoke('merge:active')),
   getMergeDiagnostics: (id, revision) =>
     mergeResult(ipcRenderer.invoke('merge:diagnostics', id, revision)),

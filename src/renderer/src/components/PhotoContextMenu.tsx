@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { Trash2, Layers } from 'lucide-react'
 import { mergeUnavailable, type MergeMode } from '../../../shared/merge'
+import type { StackSummary } from '../../../shared/stacks'
 import styles from './PhotoActions.module.css'
 
 export function PhotoContextMenu({
@@ -10,6 +11,11 @@ export function PhotoContextMenu({
   onDelete,
   onMerge,
   onClose,
+  stack,
+  canGroup,
+  canSetCover,
+  busy,
+  onStackAction,
 }: {
   x: number
   y: number
@@ -17,6 +23,11 @@ export function PhotoContextMenu({
   onDelete: () => void
   onMerge: (mode: MergeMode) => void
   onClose: (restoreFocus?: boolean) => void
+  stack?: StackSummary | null
+  canGroup: boolean
+  canSetCover: boolean
+  busy: boolean
+  onStackAction: (action: 'group' | 'ungroup' | 'remove' | 'cover' | 'select' | 'scan') => void
 }) {
   const menu = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
@@ -24,7 +35,7 @@ export function PhotoContextMenu({
     const box = element.getBoundingClientRect()
     element.style.left = `${Math.max(8, Math.min(x, innerWidth - box.width - 8))}px`
     element.style.top = `${Math.max(8, Math.min(y, innerHeight - box.height - 8))}px`
-    element.querySelectorAll('button').item(2)?.focus()
+    element.querySelector<HTMLButtonElement>('[data-delete-action]')?.focus()
     const outside = (event: PointerEvent) => {
       if (!element.contains(event.target as Node)) onClose(false)
     }
@@ -79,6 +90,69 @@ export function PhotoContextMenu({
       ))}
       {mergeUnavailable(count) && <p id="merge-unavailable">{mergeUnavailable(count)}</p>}
       <button
+        role="menuitem"
+        aria-disabled={!canGroup || busy}
+        title={
+          busy
+            ? 'Finish the current library task first.'
+            : !canGroup
+              ? 'Select at least two ungrouped photos.'
+              : undefined
+        }
+        onClick={() => {
+          if (canGroup && !busy) onStackAction('group')
+        }}
+      >
+        <Layers size={14} />
+        Group selected photos
+      </button>
+      {stack && (
+        <>
+          <button role="menuitem" onClick={() => onStackAction('select')}>
+            <Layers size={14} />
+            Select stack
+          </button>
+          <button
+            role="menuitem"
+            aria-disabled={busy}
+            onClick={() => {
+              if (!busy) onStackAction('ungroup')
+            }}
+          >
+            Ungroup stack
+          </button>
+          <button
+            role="menuitem"
+            aria-disabled={busy}
+            onClick={() => {
+              if (!busy) onStackAction('remove')
+            }}
+          >
+            Remove from stack
+          </button>
+          <button
+            role="menuitem"
+            aria-disabled={busy || !canSetCover}
+            onClick={() => {
+              if (!busy && canSetCover) onStackAction('cover')
+            }}
+          >
+            Set as cover
+          </button>
+        </>
+      )}
+      <button
+        role="menuitem"
+        aria-disabled={busy}
+        onClick={() => {
+          if (!busy) onStackAction('scan')
+        }}
+      >
+        <Layers size={14} />
+        Group capture sequences…
+      </button>
+      <button
+        data-delete-action
         role="menuitem"
         aria-disabled={count === 0}
         onClick={() => {

@@ -19,6 +19,7 @@ export class RemovalStore {
     private root: string,
     private db: DatabaseSync,
     private trash: (path: string) => Promise<void>,
+    private repairMemberships: (id: string) => void = () => {},
   ) {}
 
   private paths(id: string, staged: string) {
@@ -34,6 +35,7 @@ export class RemovalStore {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.db.prepare('DELETE FROM photos WHERE id = ?').run(id)
+      this.repairMemberships(id)
       this.db.prepare('DELETE FROM removals WHERE id = ?').run(id)
       this.db.exec('COMMIT')
     } catch (error) {

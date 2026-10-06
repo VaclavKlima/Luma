@@ -61,6 +61,22 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
     }
   }
 
+  async inspectCapture(
+    path: string,
+    signal: AbortSignal,
+  ): Promise<import('../shared/capture-sequence').CaptureMetadata> {
+    try {
+      return await this.run<import('../shared/capture-sequence').CaptureMetadata>(
+        'capture-metadata',
+        path,
+        '',
+        signal,
+      )
+    } finally {
+      await this.close()
+    }
+  }
+
   async renderFull(
     path: string,
     output: string,
@@ -117,7 +133,7 @@ export class PreviewProcess implements PreviewProcessor, FullPreviewProcessor {
   }
 
   private async run<T>(
-    mode: 'process' | 'full' | 'metadata' | 'statistics',
+    mode: 'process' | 'full' | 'metadata' | 'capture-metadata' | 'statistics',
     path: string,
     output: string,
     signal: AbortSignal,

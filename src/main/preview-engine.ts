@@ -1,4 +1,6 @@
 import { imageStatistics } from '../shared/statistics'
+import { captureMetadata, type CaptureMetadata } from '../shared/capture-sequence'
+import { extname } from 'node:path'
 import { renderHdr } from './processing/hdr-processing'
 import { resolveWhiteBalance } from './processing/white-balance'
 import {
@@ -46,6 +48,16 @@ export class PreviewEngine {
   private working?: { key: string; frame: WorkingFrame }
   private retained?: { path: string; source?: RawSource; linear?: LinearFrame }
 
+  async inspectCapture(path: string): Promise<CaptureMetadata> {
+    if (this.tool.ended) this.tool = new ExifTool({ maxProcs: 1, taskTimeoutMillis: 20_000 })
+    try {
+      const tags = await this.tool.readRaw(path, { readArgs: ['-G1', '-n'] })
+      return captureMetadata(tags as Record<string, unknown>, extname(path).slice(1))
+    } finally {
+      await this.tool.end()
+    }
+  }
+
   async inspect(path: string): Promise<ProcessingMetadata> {
     if (this.tool.ended) this.tool = new ExifTool({ maxProcs: 1, taskTimeoutMillis: 20_000 })
     try {
@@ -81,12 +93,9 @@ export class PreviewEngine {
   async process(path: string, output: string): Promise<PreviewResult> {
     if (this.tool.ended) this.tool = new ExifTool({ maxProcs: 1, taskTimeoutMillis: 20_000 })
     const tags: Tags = await this.tool.read(path).catch(() => ({}))
-    const processing = processingMetadata(
-      {
-        ...(await this.tool.read(path, ['-G1', '-n']).catch(() => ({}))),
-      },
-      rawDecoder(path) ? undefined : [],
-    )
+    const rawTags = await this.tool.readRaw(path, { readArgs: ['-G1', '-n'] }).catch(() => ({}))
+    const capture = captureMetadata(rawTags as Record<string, unknown>, extname(path).slice(1))
+    const processing = processingMetadata({ ...rawTags }, rawDecoder(path) ? undefined : [])
     if (rawDecoder(path)) {
       const session = await rawDecoder(path)!.open(path)
       try {
@@ -156,7 +165,7 @@ export class PreviewEngine {
         .resize({ width: 480, height: 480, fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: 82 })
         .toFile(join(output, 'thumb.jpg'))
-      return { metadata, source, processing }
+      return { metadata, source, processing, captureMetadata: capture }
     } finally {
       await this.tool.end()
       await rm(embedded, { force: true })

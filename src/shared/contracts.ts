@@ -12,6 +12,36 @@ export interface AppInfo {
 }
 
 export interface LumaApi {
+  listStacks(): Promise<import('./stacks').StackOverview>
+  getPhotoStack(photoId: string): Promise<import('./stacks').StackSummary | null>
+  getStackMembers(stackId: string, offset?: number): Promise<import('./stacks').StackMembers>
+  groupPhotos(
+    ids: string[],
+    coverId: string,
+    expectedRevision: number,
+  ): Promise<import('./stacks').StackSummary>
+  ungroupStack(stackId: string, expectedRevision: number): Promise<void>
+  removeFromStack(
+    photoId: string,
+    expectedRevision: number,
+  ): Promise<import('./stacks').StackSummary | null>
+  setStackCover(
+    stackId: string,
+    photoId: string,
+    expectedRevision: number,
+  ): Promise<import('./stacks').StackSummary>
+  setStackExpanded(
+    stackId: string,
+    expanded: boolean,
+    expectedRevision: number,
+  ): Promise<import('./stacks').StackSummary>
+  listGallery(offset?: number, selectedIds?: string[]): Promise<import('./stacks').GalleryPage>
+  locateGalleryPhoto(
+    photoId: string,
+    direction?: -1 | 0 | 1,
+  ): Promise<import('./stacks').GalleryLocation | null>
+  getGalleryRange(fromId: string, toId: string): Promise<PhotoReference[]>
+  groupCaptureSequences(): Promise<string>
   getActiveMergeReview(): Promise<import('./merge').MergeReview | null>
   getMergeDiagnostics(id: string, revision: number): Promise<import('./merge').MergeDiagnostics>
   createMergeReview(
@@ -149,7 +179,7 @@ export interface PhotoLocation extends PhotoPage {
 
 export interface BackgroundTask {
   mergeMeasurements?: import('./merge').MergeMeasurements
-  kind: 'import' | 'delete' | 'merge'
+  kind: 'import' | 'delete' | 'merge' | 'capture-grouping'
   phase?: string
   resultPhotoId?: string
   id: string

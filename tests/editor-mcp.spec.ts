@@ -27,6 +27,18 @@ test('stdio editing tools share persisted history with UI without a development 
     ])
     expect(previewTool.inputSchema.required).toEqual(['reviewId', 'expectedRevision'])
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+      'luma_list_stacks',
+      'luma_get_photo_stack',
+      'luma_get_stack_members',
+      'luma_group_photos',
+      'luma_ungroup_stack',
+      'luma_remove_from_stack',
+      'luma_set_stack_cover',
+      'luma_set_stack_expanded',
+      'luma_list_gallery',
+      'luma_locate_gallery_photo',
+      'luma_get_gallery_range',
+      'luma_group_capture_sequences',
       'luma_get_active_merge_review',
       'luma_get_merge_diagnostics',
       'luma_create_merge_review',

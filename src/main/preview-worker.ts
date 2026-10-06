@@ -35,16 +35,18 @@ process.on('message', async (data: PreviewWorkerRequest) => {
         ? data.frame?.hdr
           ? await scanHdr(data.path, data.frame.hdr)
           : await engine.statistics(data.path, data.frame!)
-        : data.type === 'metadata'
-          ? await engine.inspect(data.path)
-          : data.type === 'full'
-            ? await engine.renderFull(
-                data.path,
-                data.output,
-                (stage) => send({ type: 'stage', stage }),
-                data.options,
-              )
-            : await engine.process(data.path, data.output)
+        : data.type === 'capture-metadata'
+          ? await engine.inspectCapture(data.path)
+          : data.type === 'metadata'
+            ? await engine.inspect(data.path)
+            : data.type === 'full'
+              ? await engine.renderFull(
+                  data.path,
+                  data.output,
+                  (stage) => send({ type: 'stage', stage }),
+                  data.options,
+                )
+              : await engine.process(data.path, data.output)
     send({ type: 'result', result })
   } catch (error) {
     send({ type: 'error', error: error instanceof Error ? error.message : String(error) })

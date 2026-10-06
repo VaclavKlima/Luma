@@ -53,6 +53,10 @@ Select 2–32 compatible Sony RAWs, then choose **Actions → Merge to HDR…** 
 
 ## Select and delete photographs
 
+Photo stacks expand inline through a separate member-count button. Use **Actions → Group selected photos** for at least two ungrouped photographs, or use **Select stack**, **Set as cover**, **Remove from stack**, and **Ungroup stack** in a photo's context menu. Merge results become collapsed covers while retaining their sources and older results. Covers and members remain individually editable; hidden selections stay counted and named. Stacks and their expansion state persist across restarts. Pages and Previous/Next follow 60 visible photo rows.
+
+Verified Sony ZV-1A ARW continuous captures group after successful import. **Actions → Group capture sequences…** scans existing managed originals in a cancellable metadata-only background task, preserving manual organization. Missing or conflicting metadata stays available for manual grouping. BRK and additional cameras remain unverified. See [stack behavior and capture acceptance](docs/photo-stacks.md).
+
 - Click a thumbnail to select it. **Shift-click** selects a range, including photos on other library pages. **Ctrl/Cmd-click** toggles individual photos; Ctrl/Cmd+Shift-click adds a range.
 - Paging keeps your selection and preview. The library shows the selection count, including photos on other pages. Preview Previous/Next switches to a single selected photo.
 - Press **Delete**, or right-click a thumbnail or the main preview and choose **Delete**. Right-clicking a selected photo keeps the group; right-clicking an unselected photo selects only that photo. Shift+F10 opens the same menu from the keyboard.
