@@ -168,7 +168,7 @@ function createWindow(): void {
     details: { isMainFrame: boolean; requestingUrl?: string },
   ) =>
     contents === window.webContents &&
-    permission === 'window-management' &&
+    (permission === 'window-management' || permission === 'pointerLock') &&
     details.isMainFrame &&
     details.requestingUrl === trustedUrl &&
     contents.getURL() === trustedUrl

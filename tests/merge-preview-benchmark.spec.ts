@@ -22,6 +22,7 @@ test('warmed native merge wheel and drag presentation with deghost overlay', asy
         const result = await viewport.evaluate(async (el, gesture) => {
           const bounds = el.getBoundingClientRect()
           const latencies: number[] = []
+          let lastOffset = 0
           const afterPaint = () =>
             new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
           // Four events per frame exercise high-frequency devices without CDP transport delay.
@@ -43,17 +44,28 @@ test('warmed native merge wheel and drag presentation with deghost overlay', asy
                 )
               } else {
                 const offset = Math.sin((i * 4 + n) / 15) * 80
-                el.dispatchEvent(
-                  new PointerEvent('pointermove', {
-                    bubbles: true,
-                    pointerId: 1,
-                    isPrimary: true,
-                    pointerType: 'mouse',
-                    buttons: 1,
-                    clientX: bounds.x + bounds.width / 2 + offset,
-                    clientY: bounds.y + bounds.height / 2 + offset / 2,
-                  }),
-                )
+                if (document.pointerLockElement === el)
+                  el.dispatchEvent(
+                    new MouseEvent('mousemove', {
+                      bubbles: true,
+                      buttons: 1,
+                      movementX: offset - lastOffset,
+                      movementY: (offset - lastOffset) / 2,
+                    }),
+                  )
+                else
+                  el.dispatchEvent(
+                    new PointerEvent('pointermove', {
+                      bubbles: true,
+                      pointerId: 1,
+                      isPrimary: true,
+                      pointerType: 'mouse',
+                      buttons: 1,
+                      clientX: bounds.x + bounds.width / 2 + offset,
+                      clientY: bounds.y + bounds.height / 2 + offset / 2,
+                    }),
+                  )
+                lastOffset = offset
               }
             }
             await afterPaint()

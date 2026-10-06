@@ -63,7 +63,7 @@ A deletion journal reconciles interrupted moves on startup. Temporary removal bu
 
 ## Preview controls
 
-- Scroll over the preview to zoom around the pointer. Drag with the left mouse button to move a zoomed image; movement stops at the image edges.
+- Scroll over the preview to zoom around the pointer. Drag with the left mouse button to move a zoomed image; movement stops at the image edges. In both the photo and merge previews, dragging hides and locks the mouse cursor so panning continues beyond the window edges. Release the button or press Escape to restore the cursor.
 - Use the compact toolbar for zoom steps, percentage presets from 10% to 3200%, and **Fit**. Double-click the preview to switch between Fit and 100%.
 - With the preview focused, use **+ / −** to zoom, **0** for Fit, **1** for 100%, and **arrow keys** to pan. Hold Shift with an arrow for a larger step.
 - A different photo starts in Fit. Import updates and selection changes on the same photo keep its view. Resizing the window or console recalculates Fit and preserves manual zoom where possible.

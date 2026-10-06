@@ -49,6 +49,9 @@
 .dragging {
   cursor: grabbing;
 }
+.dragging[data-pointer-locked='true'] {
+  cursor: none;
+}
 .canvas {
   position: absolute;
   inset: 0;

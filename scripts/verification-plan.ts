@@ -16,7 +16,13 @@ interface Suite {
 const definitions: Suite[] = [
   { file: 'merge-raw-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'library', 'mcp'] },
   { file: 'merge-ui', group: 'electron', scopes: ['ui', 'library', 'mcp'] },
-  { file: 'merge-preview-ui', group: 'electron', scopes: ['ui', 'preview', 'library'] },
+  // Pointer-lock interaction owns the desktop cursor and must run in one window at a time.
+  {
+    file: 'merge-preview-ui',
+    group: 'electron',
+    scopes: ['ui', 'preview', 'library'],
+    exclusive: true,
+  },
   { file: 'merge-preview-benchmark', group: 'benchmark', scopes: [], family: 'merge' },
   { file: 'merge-library', group: 'service', scopes: ['library', 'adjustments', 'preview'] },
   { file: 'merge-raw', group: 'raw-gpu', scopes: ['preview', 'library'] },
@@ -32,6 +38,7 @@ const definitions: Suite[] = [
   { file: 'hdr-editor-ui', group: 'raw-gpu', scopes: ['ui', 'preview', 'adjustments', 'mcp'] },
   { file: 'hdr-display', group: 'node', scopes: ['preview'] },
   { file: 'wayland-display', group: 'node', scopes: ['ui', 'preview'] },
+  { file: 'pan-drag', group: 'node', scopes: ['ui', 'preview'] },
   { file: 'hdr-diagnostic-ui', group: 'electron', scopes: ['ui', 'preview'] },
   ...['white-balance', 'statistics', 'contrast', 'highlights', 'tonal-adjustments', 'edits'].map(
     (file) => ({
@@ -80,6 +87,7 @@ const definitions: Suite[] = [
     file,
     group: 'electron' as const,
     scopes: ['ui', 'preview'] as Scope[],
+    exclusive: file === 'preview',
   })),
   { file: 'full-preview-ui', group: 'electron', scopes: ['preview'] },
   { file: 'lens-ui', group: 'electron', scopes: ['adjustments'] },

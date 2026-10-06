@@ -25,6 +25,9 @@
 .dragging {
   cursor: grabbing;
 }
+.dragging[data-pointer-locked='true'] {
+  cursor: none;
+}
 .image {
   object-fit: contain;
   position: absolute;

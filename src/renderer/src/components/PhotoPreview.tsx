@@ -37,6 +37,7 @@ import {
 import layout from '../App.module.css'
 import styles from './PhotoPreview.module.css'
 import { useFullPreview } from '../hooks/useFullPreview'
+import { usePanDrag } from '../hooks/usePanDrag'
 import { ProgressSpinner } from './ProgressSpinner'
 
 interface Model {
@@ -203,9 +204,6 @@ export function PhotoPreview({
   ])
   const editingSurface = !!working
   const placeholderView = constrain(model.view, full.placeholder ?? model.image, model.viewport)
-  const [dragging, setDragging] = useState(false)
-  const drag = useRef<{ id: number; x: number; y: number; moved: boolean } | null>(null)
-  const dragged = useRef(false)
   const change = useCallback((action: (model: Model) => Model) => {
     const next = action(current.current)
     next.view = constrain(next.view, next.image, next.viewport)
@@ -226,6 +224,17 @@ export function PhotoPreview({
   const panY = model.image.height * view.scale > model.viewport.height + 0.5
   const minimum = minimumScale(model.image, model.viewport)
 
+  const panBy = useCallback(
+    (x: number, y: number) => {
+      change((model) => ({
+        ...model,
+        view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
+      }))
+    },
+    [change],
+  )
+  const pan = usePanDrag(viewport, panBy)
+  const { dragging, dragged, stop: stopPan } = pan
   const stopDrag = useCallback(() => {
     if (
       dividerPointer.current !== null &&
@@ -233,15 +242,11 @@ export function PhotoPreview({
     )
       divider.current.releasePointerCapture(dividerPointer.current)
     dividerPointer.current = null
-    const pointer = drag.current
-    drag.current = null
-    if (pointer) {
-      dragged.current = pointer.moved
-      if (viewport.current?.hasPointerCapture(pointer.id))
-        viewport.current.releasePointerCapture(pointer.id)
-    }
-    setDragging(false)
-  }, [])
+    stopPan()
+  }, [stopPan])
+  useEffect(() => {
+    if (!ready) stopDrag()
+  }, [ready, stopDrag])
   useEffect(
     () =>
       window.luma.onLibraryEvent((event) => {
@@ -601,11 +606,9 @@ export function PhotoPreview({
     if (event.button !== 0 || !event.isPrimary || !ready) return
     event.preventDefault()
     image.current?.focus({ preventScroll: true })
-    dragged.current = false
+    pan.reset()
     if (!panX && !panY) return
-    drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
-    event.currentTarget.setPointerCapture(event.pointerId)
-    setDragging(true)
+    pan.start(event.nativeEvent)
   }
   function pointerMove(event: PointerEvent<HTMLDivElement>) {
     if (event.altKey && !event.buttons && working?.hdr) {
@@ -620,21 +623,7 @@ export function PhotoPreview({
           (mode === 'split' && event.clientX - box.left < m.viewport.width * split),
       )
     }
-    const pointer = drag.current
-    if (!pointer || pointer.id !== event.pointerId) return
-    if (!(event.buttons & 1)) {
-      stopDrag()
-      return
-    }
-    const x = event.clientX - pointer.x
-    const y = event.clientY - pointer.y
-    pointer.moved ||= Math.abs(x) + Math.abs(y) > 2
-    pointer.x = event.clientX
-    pointer.y = event.clientY
-    change((model) => ({
-      ...model,
-      view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
-    }))
+    pan.move(event.nativeEvent)
   }
   const exactPreset = ZOOM_STOPS.some((stop) => Math.abs(stop - view.scale) < 0.00001)
   const zoomValue = view.fit
@@ -658,11 +647,15 @@ export function PhotoPreview({
           data-resolution={fullVisible ? 'full' : full.placeholder ? 'placeholder' : 'loading'}
           data-image-width={model.image.width}
           data-image-height={model.image.height}
+          data-dragging={dragging}
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
           onPointerUp={stopDrag}
           onPointerCancel={stopDrag}
-          onLostPointerCapture={stopDrag}
+          onLostPointerCapture={(event) => {
+            if (event.target === divider.current) stopDrag()
+            else pan.lostCapture()
+          }}
           onDoubleClick={(event) => {
             if (!ready || dragged.current) return
             const box = event.currentTarget.getBoundingClientRect()

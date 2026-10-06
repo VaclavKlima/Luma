@@ -16,6 +16,7 @@ import {
 } from '../preview/geometry'
 import styles from './MergeViewport.module.css'
 import { MergePresenter } from '../preview/merge-presenter'
+import { usePanDrag } from '../hooks/usePanDrag'
 
 interface Model {
   image: Size
@@ -51,11 +52,8 @@ export function MergeViewport({
     view: INITIAL_VIEW,
   })
   const current = useRef(model),
-    reviewId = useRef(''),
-    drag = useRef<{ id: number; x: number; y: number; moved: boolean } | null>(null),
-    dragged = useRef(false)
-  const [dragging, setDragging] = useState(false),
-    [decoded, setDecoded] = useState<{ preview: MergePreview; fallback: boolean } | null>(null),
+    reviewId = useRef('')
+  const [decoded, setDecoded] = useState<{ preview: MergePreview; fallback: boolean } | null>(null),
     [failed, setFailed] = useState<MergePreview | null>(null)
   const ready =
     !!preview &&
@@ -98,15 +96,20 @@ export function MergeViewport({
     },
     [schedule],
   )
-  const stopDrag = useCallback(() => {
-    const pointer = drag.current
-    drag.current = null
-    if (!pointer) return
-    dragged.current = pointer.moved
-    if (viewport.current?.hasPointerCapture(pointer.id))
-      viewport.current.releasePointerCapture(pointer.id)
-    setDragging(false)
-  }, [])
+  const panBy = useCallback(
+    (x: number, y: number) => {
+      change(
+        (model) => ({
+          ...model,
+          view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
+        }),
+        false,
+      )
+    },
+    [change],
+  )
+  const pan = usePanDrag(viewport, panBy)
+  const { dragging, dragged, stop: stopDrag } = pan
 
   useEffect(() => {
     stopDrag()
@@ -289,31 +292,9 @@ export function MergeViewport({
     if (event.button !== 0 || !event.isPrimary || !ready) return
     event.preventDefault()
     event.currentTarget.focus({ preventScroll: true })
-    dragged.current = false
+    pan.reset()
     if (!pannable) return
-    drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
-    event.currentTarget.setPointerCapture(event.pointerId)
-    setDragging(true)
-  }
-  function pointerMove(event: PointerEvent<HTMLDivElement>) {
-    const pointer = drag.current
-    if (!pointer || pointer.id !== event.pointerId) return
-    if (!(event.buttons & 1) || !ready) {
-      stopDrag()
-      return
-    }
-    const x = event.clientX - pointer.x,
-      y = event.clientY - pointer.y
-    pointer.moved ||= Math.abs(x) + Math.abs(y) > 2
-    pointer.x = event.clientX
-    pointer.y = event.clientY
-    change(
-      (model) => ({
-        ...model,
-        view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
-      }),
-      false,
-    )
+    pan.start(event.nativeEvent)
   }
   const preset = ZOOM_STOPS.find((stop) => Math.abs(stop - view.scale) < 0.00001)
   return (
@@ -387,10 +368,10 @@ export function MergeViewport({
         data-fit={view.fit}
         data-dragging={dragging && ready}
         onPointerDown={pointerDown}
-        onPointerMove={pointerMove}
+        onPointerMove={(event) => pan.move(event.nativeEvent)}
         onPointerUp={stopDrag}
         onPointerCancel={stopDrag}
-        onLostPointerCapture={stopDrag}
+        onLostPointerCapture={pan.lostCapture}
         onDoubleClick={(event) => {
           if (!ready || dragged.current) return
           if (view.fit) {

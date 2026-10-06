@@ -2,6 +2,7 @@ import type { Page } from '@playwright/test'
 import sharp from 'sharp'
 import { expect, test } from './electron.fixture'
 import { importPhotos } from './import.helpers'
+import { focusPreviewWindow, verifyLockedPan } from './preview-pan.helpers'
 
 async function geometry(page: Page) {
   return page.getByTestId('preview-viewport').evaluate((element) => {
@@ -30,11 +31,22 @@ async function geometry(page: Page) {
   })
 }
 
+test('mouse panning hides and locks the cursor until release or interruption', async ({ luma }) => {
+  await importPhotos(luma.app, luma.page)
+  await verifyLockedPan(
+    luma.app,
+    luma.page,
+    luma.page.getByTestId('preview-viewport'),
+    luma.page.getByRole('combobox', { name: 'Preview zoom', exact: true }),
+  )
+})
+
 test('zooms at the pointer, pans with capture, and retains keyboard and context-menu controls', async ({
   luma,
 }, testInfo) => {
   const { app, page } = luma
   await importPhotos(app, page)
+  await focusPreviewWindow(app, page)
   const viewport = page.getByTestId('preview-viewport')
   const zoom = page.getByRole('combobox', { name: 'Preview zoom' })
   await expect(zoom).toHaveValue('fit')
@@ -57,16 +69,27 @@ test('zooms at the pointer, pans with capture, and retains keyboard and context-
   await page.mouse.down()
   await page.mouse.move(5, 5, { steps: 8 })
   await page.mouse.up()
-  await expect(viewport).not.toHaveCSS('cursor', 'grabbing')
+  await expect(viewport).not.toHaveCSS('cursor', 'none')
   const released = await geometry(page)
   await page.mouse.move(point.x, point.y)
   expect((await geometry(page)).x).toBe(released.x)
   // Cancellation and loss of capture must not leave subsequent moves attached to the photo.
   for (const event of ['pointercancel', 'lostpointercapture']) {
     await page.mouse.down()
-    await expect(viewport).toHaveCSS('cursor', 'grabbing')
-    await viewport.dispatchEvent(event)
-    await expect(viewport).not.toHaveCSS('cursor', 'grabbing')
+    await expect
+      .poll(() =>
+        viewport.evaluate((el) => el.hasPointerCapture(1) || document.pointerLockElement === el),
+      )
+      .toBe(true)
+    if (event === 'lostpointercapture') {
+      await expect
+        .poll(() => viewport.evaluate((el) => document.pointerLockElement === el))
+        .toBe(true)
+      await page.evaluate(() => document.exitPointerLock())
+    } else await viewport.dispatchEvent(event)
+    await expect(viewport).toHaveAttribute('data-dragging', 'false')
+    await expect.poll(() => page.evaluate(() => document.pointerLockElement === null)).toBe(true)
+    await expect(viewport).not.toHaveCSS('cursor', 'none')
     const cancelled = await geometry(page)
     await page.mouse.move(point.x + 20, point.y + 20)
     expect((await geometry(page)).x).toBe(cancelled.x)
