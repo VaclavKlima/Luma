@@ -13,6 +13,7 @@ import {
 } from '../../../shared/hdr'
 import type { HdrAnalysisDomain } from '../../../shared/hdr-statistics'
 import { streamHdr } from '../preview/hdr-stream'
+import { renderHdrContent } from '../../../shared/display-rendering'
 export function useHdrPixel(
   frame: WorkingFrame | null,
   parameters: AdjustmentParameters,
@@ -51,12 +52,14 @@ export function useHdrPixel(
               hdrAdjustmentMatrix(p, asset.whiteBalance) ?? undefined,
             )
             const output = outputHdr(rgb, target),
-              values = domain === 'working-hdr' ? rgb : output.rgb
-            const y = domain === 'working-hdr' ? luminance(rgb) : output.luminance
+              content = domain === 'content-hdr' ? renderHdrContent(rgb) : undefined,
+              values = domain === 'working-hdr' ? rgb : (content?.rgb ?? output.rgb)
+            const y =
+              domain === 'working-hdr' ? luminance(rgb) : (content?.luminance ?? output.luminance)
             if (!abort.signal.aborted)
               setReadout({
                 key: identity,
-                value: `${before ? 'Before' : 'After'} · ${domain === 'working-hdr' ? 'Working HDR · Rec.2020' : `Output · ${target.colorSpace}`} · ${px}, ${py} · RGB ${values.map((v) => v.toFixed(4)).join(', ')} · ${y.toFixed(4)}× white · ${y > 0 ? `${Math.log2(y).toFixed(2)} stops` : y === 0 ? 'zero luminance' : 'negative luminance'} · α ${data[index + 3].toFixed(2)}`,
+                value: `${before ? 'Before' : 'After'} · ${domain === 'working-hdr' ? 'Working HDR · Rec.2020' : domain === 'content-hdr' ? 'Content HDR · Rec.2020' : `Output · ${target.colorSpace}`} · ${px}, ${py} · RGB ${values.map((v) => v.toFixed(4)).join(', ')} · ${y.toFixed(4)}× white · ${y > 0 ? `${Math.log2(y).toFixed(2)} stops` : y === 0 ? 'zero luminance' : 'negative luminance'} · α ${data[index + 3].toFixed(2)}`,
               })
           }
         })().catch((error) => {

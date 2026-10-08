@@ -82,7 +82,6 @@ test('starts the built desktop application with its isolated preload bridge', as
       'reportDisplayCapabilities',
       'onDisplayState',
       'onDisplayRefresh',
-      'upgradePhotoProcessing',
       'onFlushEdits',
       'getPhotoStatistics',
       'getEdits',

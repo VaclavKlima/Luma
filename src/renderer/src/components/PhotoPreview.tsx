@@ -51,6 +51,7 @@ interface Props {
   displayTarget: DisplayTarget
   tools: PreviewTools
   gesturing: boolean
+  editingEpoch?: number
   adjustments: AdjustmentParameters
   onEditingReady: (photoId: string | null) => void
   photo: Photo | null
@@ -69,6 +70,7 @@ export function PhotoPreview({
   adjustments,
   tools,
   gesturing,
+  editingEpoch = 0,
   onEditingReady,
   total,
   position,
@@ -83,9 +85,33 @@ export function PhotoPreview({
   const [mask, setMask] = useState<ClippingMask>()
   const viewport = useRef<HTMLDivElement>(null)
   const image = useRef<HTMLCanvasElement>(null)
+  const retainedSurface = useRef<HTMLCanvasElement>(null)
+  const [retained, setRetained] = useState(false)
   const restoreCanvasFocus = useRef(false)
   const attachCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
-    if (!canvas) restoreCanvasFocus.current = document.activeElement === image.current
+    if (!canvas) {
+      restoreCanvasFocus.current = document.activeElement === image.current
+      const previous = image.current,
+        surface = retainedSurface.current
+      if (surface && previous?.dataset.editing === 'ready') {
+        try {
+          if (previous.dataset.backend === 'webgpu-hdr') {
+            // A lost device's drawing buffer is unavailable. The presenter saved
+            // this bounded copy while the completed frame was still readable.
+            if (surface.dataset.presentationSerial === previous.dataset.presentationSerial)
+              setRetained(true)
+          } else {
+            const scale = Math.min(1, 1024 / Math.max(previous.width, previous.height))
+            surface.width = Math.max(1, Math.round(previous.width * scale))
+            surface.height = Math.max(1, Math.round(previous.height * scale))
+            surface.getContext('2d')!.drawImage(previous, 0, 0, surface.width, surface.height)
+            setRetained(true)
+          }
+        } catch {
+          /* Keep first-render loading explicit if a lost device cannot be copied. */
+        }
+      }
+    }
     image.current = canvas
     if (canvas && restoreCanvasFocus.current) {
       canvas.focus({ preventScroll: true })
@@ -104,6 +130,11 @@ export function PhotoPreview({
   const [fallback, setFallback] = useState(false)
   const presenter = useRef<PreviewPresenter | HdrPresenter | HdrCpuPresenter | null>(null)
   const [hdrReady, setHdrReady] = useState(false)
+  useEffect(() => {
+    if (!hdrReady) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRetained(false)
+  }, [hdrReady])
   const selectedAt = useRef(0)
   const firstPresentedMs = useRef<number | undefined>(undefined)
   useEffect(() => {
@@ -114,7 +145,7 @@ export function PhotoPreview({
   const fullVisible = Boolean(full.preview && (displayedUrl || full.preview.linear?.hdr))
   const live = useWorkingPreview(full.preview, fullVisible && !suspended)
   const { working, generation } = live
-  const { mode, split, analyze, update } = tools
+  const { mode, split, hdrRanges, analyze, update } = tools
   const actualTarget = useMemo(
     () =>
       fallback
@@ -122,11 +153,16 @@ export function PhotoPreview({
             ...SDR_TARGET,
             generation: displayTarget.generation,
             requested: displayTarget.requested,
+            headroom: displayTarget.headroom,
           }
         : displayTarget,
     [fallback, displayTarget],
   )
-  const hdrOverlay = tools.domain === 'working-hdr' ? tools.hdrOverlay & 4 : tools.hdrOverlay
+  const hdrOverlay = hdrRanges
+    ? 0
+    : tools.domain === 'working-hdr'
+      ? tools.hdrOverlay & 4
+      : tools.hdrOverlay
   const shadows = tools.shadows || tools.hover === 'shadows'
   const highlights = tools.highlights || tools.hover === 'highlights'
   usePreviewAnalysis(
@@ -142,10 +178,12 @@ export function PhotoPreview({
     hdrReady && !suspended ? working : null,
     mode === 'before' ? neutralAdjustments : adjustments,
     actualTarget,
-    'output',
+    'content-hdr',
     !!hdrOverlay,
     analyze,
     setMask,
+    gesturing,
+    fallback,
   )
   useEffect(() => {
     if (gesturing && mode === 'before') update({ mode: 'after' })
@@ -315,6 +353,8 @@ export function PhotoPreview({
                 setFallback(true)
               },
               () => setHdrReady(true),
+              analyze,
+              retainedSurface.current ?? undefined,
             )
       } else
         presenter.current = new PreviewPresenter(canvas, fallback || !editingSurface, () =>
@@ -328,7 +368,7 @@ export function PhotoPreview({
       presenter.current?.dispose()
       presenter.current = null
     }
-  }, [fallback, generation, editingSurface, working?.hdr, displayFailed, suspended])
+  }, [fallback, generation, editingSurface, working?.hdr, displayFailed, suspended, analyze])
 
   useEffect(() => {
     if (
@@ -425,8 +465,12 @@ export function PhotoPreview({
   useEffect(() => {
     if (suspended) return
     const started = performance.now()
-    const id = requestAnimationFrame(() => {
+    const draw = () => {
       presenter.current?.setComparison(mode, split)
+      if (presenter.current instanceof HdrPresenter || presenter.current instanceof HdrCpuPresenter)
+        presenter.current.setHdrRanges(hdrRanges)
+      if (presenter.current instanceof HdrPresenter)
+        presenter.current.setEditing(gesturing, editingEpoch)
       presenter.current?.draw(model.image, model.viewport, model.view, {
         whiteBalance: adjustments.whiteBalance,
         exposureEv: adjustments.exposureEv,
@@ -448,7 +492,13 @@ export function PhotoPreview({
           scale: model.view.scale,
         },
       })
-    })
+    }
+    // Submission begins immediately; GPU completion gates publication of each draft.
+    if (presenter.current instanceof HdrPresenter) {
+      draw()
+      return
+    }
+    const id = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(id)
   }, [
     suspended,
@@ -462,9 +512,12 @@ export function PhotoPreview({
     adjustments.whiteBalance,
     mode,
     split,
+    hdrRanges,
     working,
     fallback,
     generation,
+    gesturing,
+    editingEpoch,
   ])
 
   useEffect(() => {
@@ -689,6 +742,8 @@ export function PhotoPreview({
                 aria-label={photo.filename}
                 data-testid="main-preview"
                 data-suspended={suspended}
+                data-gesturing={gesturing}
+                data-editing-epoch={editingEpoch}
                 data-src={full.preview?.url}
                 tabIndex={0}
                 aria-keyshortcuts="+ - 0 1 ArrowLeft ArrowRight ArrowUp ArrowDown"
@@ -699,6 +754,18 @@ export function PhotoPreview({
                     fullVisible && ready && (!full.preview?.linear?.hdr || hdrReady)
                       ? 'visible'
                       : 'hidden',
+                }}
+              />
+              <canvas
+                ref={retainedSurface}
+                className={styles.canvas}
+                aria-hidden="true"
+                data-testid="retained-preview"
+                style={{
+                  width: model.viewport.width || undefined,
+                  height: model.viewport.height || undefined,
+                  visibility: retained && !hdrReady ? 'visible' : 'hidden',
+                  pointerEvents: 'none',
                 }}
               />
               <canvas
@@ -782,7 +849,7 @@ export function PhotoPreview({
                   }}
                 />
               )}
-              {(!fullVisible || (!!full.preview?.linear?.hdr && !hdrReady)) && (
+              {(!fullVisible || (!!full.preview?.linear?.hdr && !hdrReady && !retained)) && (
                 <div className={styles.message} role={full.error ? 'alert' : 'status'}>
                   {full.error ? (
                     <span>Could not load this preview.</span>

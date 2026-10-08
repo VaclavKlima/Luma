@@ -192,20 +192,14 @@ const tools = [
     inputSchema: schema({ preference: { enum: ['auto', 'hdr', 'sdr'] } }),
   },
   {
-    name: 'luma_upgrade_photo_processing',
-    description:
-      'Upgrade an eligible Sony RAW to experimental HDR processing as one undoable edit.',
-    inputSchema: schema({ photoId, expectedRevision }),
-  },
-  {
     name: 'luma_get_photo_statistics',
     description:
-      'Exact committed statistics. Omit domain for compatible SDR sRGB bins; HDR domains use stops relative to white. Current output requires targetGeneration from display state.',
+      'Exact committed statistics. Omit domain for compatible SDR sRGB bins. working-hdr is scene-linear; content-hdr is fixed Rec.2020 HDR content; output is the presented rendition. Current display diagnostics require targetGeneration from display state.',
     inputSchema: schema(
       {
         photoId,
         expectedRevision,
-        domain: { enum: ['working-hdr', 'output'] },
+        domain: { enum: ['working-hdr', 'content-hdr', 'output'] },
         target: { enum: ['sdr', 'current'] },
         targetGeneration: { type: 'integer', minimum: 0 },
       },

@@ -3,6 +3,7 @@ import type { HdrPhotoStatistics, HdrAnalysisDomain } from '../shared/hdr-statis
 import {
   validateHdrSource,
   HDR_SOURCE_VERSION,
+  HDR_RAW_SOURCE_VERSION,
   HDR_ADJUSTMENT_VERSION,
   HDR_OUTPUT_VERSION,
   type DisplayTarget,
@@ -20,8 +21,8 @@ import { createReadStream } from 'node:fs'
 import type { FullPreview, HdrPreview, DisplayPreview } from '../shared/contracts'
 import type { FullPreviewProcessor, FullPreviewResult } from './preview-types'
 
-// Bump whenever decoding, color, or output policy changes.
-export const PREVIEW_VERSION = 'v8'
+// Cache layout version. Source and output identities separately invalidate pixel variants.
+export const PREVIEW_VERSION = 'v9'
 const hashPattern = /^[a-f0-9]{64}$/
 const tokenPattern = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
 interface Entry extends FullPreviewResult {
@@ -258,8 +259,12 @@ export class FullPreviews {
               .update(
                 JSON.stringify([
                   id,
-                  options.processing ?? 'legacy-sdr-v1',
-                  options.processing === 'hdr-v1' ? HDR_SOURCE_VERSION : null,
+                  options.processing ?? 'display-referred-v1',
+                  options.processing === 'hdr-v1'
+                    ? options.metadata.mergeMaster
+                      ? HDR_SOURCE_VERSION
+                      : HDR_RAW_SOURCE_VERSION
+                    : null,
                   LENS_RENDER_VERSION,
                   CROP_POLICY,
                   rawDecoderDefinitions,
@@ -300,8 +305,12 @@ export class FullPreviews {
                 .update(
                   JSON.stringify([
                     id,
-                    options.processing ?? 'legacy-sdr-v1',
-                    options.processing === 'hdr-v1' ? HDR_SOURCE_VERSION : null,
+                    options.processing ?? 'display-referred-v1',
+                    options.processing === 'hdr-v1'
+                      ? options.metadata.mergeMaster
+                        ? HDR_SOURCE_VERSION
+                        : HDR_RAW_SOURCE_VERSION
+                      : null,
                     LENS_RENDER_VERSION,
                     CROP_POLICY,
                     rawDecoderDefinitions,
@@ -474,7 +483,7 @@ export class FullPreviews {
         await this.prune()
         check()
         const renderId = workingOnly
-          ? `${HDR_SOURCE_VERSION}-${entry.linear!.sha256}`
+          ? `${entry.linear!.hdr?.source.highlightBlend ? HDR_RAW_SOURCE_VERSION : HDR_SOURCE_VERSION}-${entry.linear!.sha256}`
           : entry.renderId
         if (!background)
           this.diagnostics = {

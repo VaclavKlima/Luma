@@ -6,6 +6,7 @@ export interface PreviewToolsState {
   hdr: boolean
   domain: HdrAnalysisDomain
   hdrOverlay: number
+  hdrRanges: boolean
   mode: ComparisonMode
   split: number
   shadows: boolean
@@ -15,8 +16,9 @@ export interface PreviewToolsState {
 }
 const initial: PreviewToolsState = {
   hdr: false,
-  domain: 'output',
+  domain: 'content-hdr',
   hdrOverlay: 0,
+  hdrRanges: false,
   mode: 'after',
   split: 0.5,
   shadows: false,

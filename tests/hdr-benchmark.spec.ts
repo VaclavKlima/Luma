@@ -3,7 +3,7 @@ import { expect, test } from './electron.fixture'
 import { importPhotos } from './import.helpers'
 import { recordBenchmark } from './benchmark.helpers'
 
-test.use({ hdrDisplay: true, hdrImports: true })
+test.use({ hdrDisplay: true })
 for (const adjustment of ['exposure'] as const)
   test(`benchmarks warmed HDR ${adjustment} gestures through the actual editor`, async ({
     luma,

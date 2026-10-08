@@ -1,4 +1,4 @@
-# Natural rendering and full HDR roadmap
+# Rendering and full HDR roadmap
 
 **Status: staged roadmap.** The [experimental Sony RAW HDR milestone](../hdr-processing.md) implements a limited processing, display, tone-mapping and analysis foundation. The broader workflow below remains planned. Each feature brief uses the same eleven sections and includes measurable acceptance criteria. Unresolved algorithms, dependencies, and numerical tolerances require recorded research evidence before implementation is accepted.
 
@@ -8,7 +8,7 @@ The destination is **RAW brackets or HDR files â†’ nondestructive HDR editing â†
 
 The [root README](../../README.md) describes the running application. It imports JPEG, PNG, TIFF, and Sony ARW into a persistent managed library. Exposure, contrast, highlights, shadows, whites, blacks, verified Sony RAW white balance, and verified lens corrections share revision-checked history. SDR histograms, clipping overlays, comparison, pixel inspection, and the dedicated editing MCP service exist. Other color controls remain disabled; the console cannot execute commands.
 
-Legacy processing retains RGBA8 sRGB output. The separate experimental HDR path uses Float32 Rec.2020 working data and HDR/SDR output targets. Current support for a container such as JPEG or TIFF does not establish HDR decoding, gain-map support, or HDR export. Sony ZV-1 compressed ARW has a real fixture; additional cameras and recording modes require their own verification. Existing Linux results do not establish Windows/macOS support.
+Supported Sony RAWs and merge masters use Float32 Rec.2020 working data and the automatic [ACES 2 renderer](../display-rendering.md) for HDR/SDR targets. Raster inputs remain color-managed display images. Current support for a container such as JPEG or TIFF does not establish HDR decoding, gain-map support, or HDR export. Sony ZV-1 compressed ARW has a real fixture; additional cameras and recording modes require their own verification. Local Linux and built-in Mac evidence does not establish physical luminance, Windows support or broader platform certification.
 
 ## Workspace feedback backlog
 
@@ -53,7 +53,7 @@ Format and licensing research may begin early. These stages order production int
 ## Shared implementation requirements
 
 - Preserve originals byte-for-byte. Use the shared application edit service, expected revisions, and photo-wide Undo/Redo for every persisted adjustment. Numeric sliders use [AdjustmentInput conventions](../input-design.md); specialized editors provide equivalent keyboard and cancellation behavior.
-- Extend settings and catalog schemas transactionally, including every history snapshot, redo branch, cursor, and timestamps. Current settings v5/catalog schema 8 are the starting point, not reserved future version numbers. Legacy render behavior remains versioned; offer an explicit undoable processing upgrade instead of silently changing existing photographs.
+- Extend settings and catalog schemas transactionally, including every history snapshot, redo branch, cursor, and timestamps. Current settings v7/catalog schema 12 preserve numeric edits during automatic rendering cutover. Rendering identities rebuild disposable caches; previous-look branches and a per-photo processing upgrade are absent.
 - Keep camera aliases and characterization in providers, native processing in separate workers, and filesystem access in main. Preserve the sandbox, context isolation, typed bridge, photo/session IDs, and MCP parity. Proposed operations in briefs are contracts to design, not existing APIs. No generic command runner or arbitrary filesystem bridge is introduced.
 - Version all pixel-affecting algorithms and include source identity, parameters, profiles, master format, and output transform in appropriate cache keys. Distinguish content identity from edit revision. Validate dimensions, layout, byte counts, hashes, color descriptors, and finite float samples before presentation.
 - Keep durable originals and merged masters outside disposable caches. Preserve the 2 GiB preview LRU, leases, one foreground request, cancellation, and current allocation bounds unless an explicit measured redesign replaces them. HDR needs tiling or bounded degradation, not unbounded full-image copies. Preview work stays outside the import/deletion task lock.
