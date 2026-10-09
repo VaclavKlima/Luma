@@ -51,7 +51,7 @@ Exposure, contrast, highlights, shadows, whites, blacks, and lens corrections sh
 
 ## Merge photographs
 
-Select 2–32 compatible Sony RAWs, then choose **Actions → Merge to HDR…** or **Stack for noise reduction…**. Both actions also appear in the photo context menu. The review opens at Fit with native detail already prepared. Scroll to zoom around the pointer, drag to pan, or use the zoom toolbar for Fit and 100%. With the image focused, use **+ / −**, **0**, **1**, and arrow keys; Shift pans farther. Zoom and framing survive settings and reference changes. Review alignment, reference choice, deghosting and shared-area crop, then choose **Merge**. The new editable master preserves its sources and appears through **Open result** in the task details. This is experimental; see [processing limits and verification gaps](docs/merge-processing.md).
+Select 2–32 compatible Sony RAWs, then choose **Actions → Merge to HDR…** or **Stack for noise reduction…**. Both actions also appear in the photo context menu. The review opens at Fit with native detail already prepared. Scroll or drag to pan a zoomed image; pinch or Ctrl-scroll to zoom around the pointer. The zoom toolbar provides Fit and 100%. With the image focused, use **+ / −**, **0**, **1**, and arrow keys; Shift pans farther. Zoom and framing survive settings and reference changes. Review alignment, reference choice, deghosting and shared-area crop, then choose **Merge**. The new editable master preserves its sources and appears through **Open result** in the task details. This is experimental; see [processing limits and verification gaps](docs/merge-processing.md).
 
 ## Select and delete photographs
 
@@ -61,7 +61,7 @@ Verified Sony ZV-1A ARW continuous captures group after successful import. **Act
 
 - Click a thumbnail to select it. **Shift-click** selects a range, including photos on other library pages. **Ctrl/Cmd-click** toggles individual photos; Ctrl/Cmd+Shift-click adds a range.
 - Paging keeps your selection and preview. The library shows the selection count, including photos on other pages. Preview Previous/Next switches to a single selected photo.
-- Press **Delete**, or right-click a thumbnail or the main preview and choose **Delete**. Right-clicking a selected photo keeps the group; right-clicking an unselected photo selects only that photo. Shift+F10 opens the same menu from the keyboard.
+- Press **Delete** or **Backspace** (the Mac Delete key), or right-click a thumbnail or the main preview and choose **Delete**. Right-clicking a selected photo keeps the group; right-clicking an unselected photo selects only that photo. Shift+F10 opens the same menu from the keyboard. Text fields, the console, open dialogs, and modifier shortcuts keep their own key handling.
 - Confirm **Move to Trash** to remove Luma’s internal copies, including originals and cached previews. Source files and SD cards stay untouched. The confirmation defaults to Cancel.
 - Deletion runs in the background using the status-bar progress indicator. Cancel stops before the next photo after the current OS Trash operation finishes. Failed photos remain in the library with per-photo errors; there is no permanent-delete fallback.
 
@@ -69,7 +69,8 @@ A deletion journal reconciles interrupted moves on startup. Temporary removal bu
 
 ## Preview controls
 
-- Scroll over the preview to zoom around the pointer. Drag with the left mouse button to move a zoomed image; movement stops at the image edges. In both the photo and merge previews, dragging hides and locks the mouse cursor so panning continues beyond the window edges. Release the button or press Escape to restore the cursor.
+- Scroll over the photo or merge preview to pan horizontally and vertically; scrolling at Fit leaves the view unchanged. Pinch on a touchpad or hold **Ctrl** while scrolling to zoom around the pointer. These gestures apply when the preview is ready; panels and the console scroll independently.
+- Drag with the left mouse button to move a zoomed image; movement stops at the image edges. In both previews, dragging hides and locks the mouse cursor so panning continues beyond the window edges. Release the button or press Escape to restore the cursor.
 - Use the compact toolbar for zoom steps, percentage presets from 10% to 3200%, and **Fit**. Double-click the preview to switch between Fit and 100%.
 - With the preview focused, use **+ / −** to zoom, **0** for Fit, **1** for 100%, and **arrow keys** to pan. Hold Shift with an arrow for a larger step.
 - A different photo starts in Fit. Import updates and selection changes on the same photo keep its view. Resizing the window or console recalculates Fit and preserves manual zoom where possible.

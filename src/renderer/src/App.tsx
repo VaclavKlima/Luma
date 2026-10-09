@@ -114,7 +114,8 @@ export function App() {
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       if (
-        event.key !== 'Delete' ||
+        (event.key !== 'Delete' && event.key !== 'Backspace') ||
+        event.defaultPrevented ||
         event.repeat ||
         event.ctrlKey ||
         event.metaKey ||

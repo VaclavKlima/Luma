@@ -49,7 +49,8 @@ test('benchmarks warmed HDR pan and zoom through GPU completion', async ({ luma 
         else
           canvas.parentElement!.dispatchEvent(
             new WheelEvent('wheel', {
-              deltaY: i % 2 ? -20 : 20,
+              deltaY: i % 2 ? -4 : 4,
+              ctrlKey: true,
               clientX: canvas.getBoundingClientRect().x + 200,
               clientY: canvas.getBoundingClientRect().y + 200,
               bubbles: true,

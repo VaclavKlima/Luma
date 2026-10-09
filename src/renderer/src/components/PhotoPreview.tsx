@@ -28,7 +28,6 @@ import {
   minimumScale,
   replaceDimensions,
   stepScale,
-  wheelScale,
   zoomAt,
   ZOOM_STOPS,
   type Size,
@@ -38,6 +37,8 @@ import layout from '../App.module.css'
 import styles from './PhotoPreview.module.css'
 import { useFullPreview } from '../hooks/useFullPreview'
 import { usePanDrag } from '../hooks/usePanDrag'
+import { usePreviewFrame } from '../hooks/usePreviewFrame'
+import { usePreviewWheel } from '../hooks/usePreviewWheel'
 import { ProgressSpinner } from './ProgressSpinner'
 
 interface Model {
@@ -242,12 +243,119 @@ export function PhotoPreview({
   ])
   const editingSurface = !!working
   const placeholderView = constrain(model.view, full.placeholder ?? model.image, model.viewport)
-  const change = useCallback((action: (model: Model) => Model) => {
-    const next = action(current.current)
-    next.view = constrain(next.view, next.image, next.viewport)
-    current.current = next
-    setModel(next)
-  }, [])
+  function draw(model: Model) {
+    const started = performance.now()
+    presenter.current?.setComparison(mode, split)
+    if (presenter.current instanceof HdrPresenter || presenter.current instanceof HdrCpuPresenter)
+      presenter.current.setHdrRanges(hdrRanges)
+    if (presenter.current instanceof HdrPresenter)
+      presenter.current.setEditing(gesturing, editingEpoch)
+    presenter.current?.draw(model.image, model.viewport, model.view, {
+      whiteBalance: adjustments.whiteBalance,
+      exposureEv: adjustments.exposureEv,
+      contrast: adjustments.contrast,
+      highlights: adjustments.highlights,
+      shadows: adjustments.shadows,
+      whites: adjustments.whites,
+      blacks: adjustments.blacks,
+    })
+    performance.measure('luma.preview.presentation', {
+      start: started,
+      detail: {
+        exposureEv: adjustments.exposureEv,
+        contrast: adjustments.contrast,
+        highlights: adjustments.highlights,
+        shadows: adjustments.shadows,
+        whites: adjustments.whites,
+        blacks: adjustments.blacks,
+        scale: model.view.scale,
+      },
+    })
+  }
+
+  function drawOverlay(model: Model) {
+    const canvas = overlay.current,
+      context = canvas?.getContext('2d')
+    if (!canvas || !context) return
+    canvas.width = Math.max(1, Math.round(model.viewport.width))
+    canvas.height = Math.max(1, Math.round(model.viewport.height))
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    if (!mask || !working) return
+    const { image, viewport, view } = model
+    let levelIndex = 0
+    while (levelIndex + 1 < mask.levels.length && view.scale * 2 ** levelIndex < 1) levelIndex++
+    const level = mask.levels[levelIndex]
+    const left = (viewport.width - image.width * view.scale) / 2 + view.x,
+      top = (viewport.height - image.height * view.scale) / 2 + view.y
+    const pixelWidth = (image.width * view.scale) / level.width,
+      pixelHeight = (image.height * view.scale) / level.height
+    const sx = Math.max(0, Math.floor(-left / pixelWidth)),
+      sy = Math.max(0, Math.floor(-top / pixelHeight))
+    const width = Math.max(
+      0,
+      Math.min(level.width, Math.ceil((viewport.width - left) / pixelWidth)) - sx,
+    )
+    const height = Math.max(
+      0,
+      Math.min(level.height, Math.ceil((viewport.height - top) / pixelHeight)) - sy,
+    )
+    if (!width || !height) return
+    const compact = document.createElement('canvas')
+    compact.width = width
+    compact.height = height
+    const pixels = new Uint8ClampedArray(width * height * 4)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const bits = level.data[(sy + y) * level.width + sx + x],
+          i = (y * width + x) * 4
+        if (working.hdr && bits & hdrOverlay) {
+          pixels[i] = 255
+          pixels[i + 1] = 160
+          pixels[i + 3] = (x + y) % 4 < 2 ? 220 : 140
+        } else if (!working.hdr && highlights && bits & 2) {
+          pixels[i] = 255
+          pixels[i + 3] = 180
+        } else if (!working.hdr && shadows && bits & 1) {
+          pixels[i + 2] = 255
+          pixels[i + 3] = 180
+        }
+      }
+    compact.getContext('2d')!.putImageData(new ImageData(pixels, width, height), 0, 0)
+    context.save()
+    if (mode === 'split') {
+      context.beginPath()
+      context.rect(canvas.width * split, 0, canvas.width, canvas.height)
+      context.clip()
+    }
+    context.imageSmoothingEnabled = false
+    context.drawImage(
+      compact,
+      left + sx * pixelWidth,
+      top + sy * pixelHeight,
+      width * pixelWidth,
+      height * pixelHeight,
+    )
+    context.restore()
+  }
+
+  const { schedule, cancel, flush } = usePreviewFrame(() => {
+    if (suspended) return
+    const model = current.current
+    setModel(model)
+    draw(model)
+    drawOverlay(model)
+  })
+  const change = useCallback(
+    (action: (model: Model) => Model, immediate = true) => {
+      const next = action(current.current)
+      if (next === current.current) return
+      next.view = constrain(next.view, next.image, next.viewport)
+      current.current = next
+      if (immediate) setModel(next)
+      schedule()
+    },
+    [schedule],
+  )
   const ready = Boolean(
     !suspended &&
     photo &&
@@ -255,6 +363,7 @@ export function PhotoPreview({
     model.image.width &&
     model.viewport.width &&
     model.viewport.height &&
+    (!full.preview?.linear?.hdr || hdrReady) &&
     !full.error,
   )
   const { view } = model
@@ -264,10 +373,13 @@ export function PhotoPreview({
 
   const panBy = useCallback(
     (x: number, y: number) => {
-      change((model) => ({
-        ...model,
-        view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
-      }))
+      change(
+        (model) => ({
+          ...model,
+          view: { ...model.view, x: model.view.x + x, y: model.view.y + y },
+        }),
+        false,
+      )
     },
     [change],
   )
@@ -282,6 +394,7 @@ export function PhotoPreview({
     dividerPointer.current = null
     stopPan()
   }, [stopPan])
+  usePreviewWheel(viewport, ready, change, stopDrag)
   useEffect(() => {
     if (!ready) stopDrag()
   }, [ready, stopDrag])
@@ -304,32 +417,9 @@ export function PhotoPreview({
       }))
     })
     observer.observe(element)
-    const wheel = (event: WheelEvent) => {
-      event.preventDefault()
-      const model = current.current
-      if (!model.loaded || !model.image.width || !model.viewport.width || !model.viewport.height)
-        return
-      stopDrag()
-      const box = element.getBoundingClientRect()
-      change((model) => ({
-        ...model,
-        view: zoomAt(
-          model.view,
-          wheelScale(model.view.scale, event.deltaY, event.deltaMode, model.viewport.height),
-          {
-            x: event.clientX - box.left - box.width / 2,
-            y: event.clientY - box.top - box.height / 2,
-          },
-          model.image,
-          model.viewport,
-        ),
-      }))
-    }
-    element.addEventListener('wheel', wheel, { passive: false })
     window.addEventListener('blur', stopDrag)
     return () => {
       observer.disconnect()
-      element.removeEventListener('wheel', wheel)
       window.removeEventListener('blur', stopDrag)
     }
   }, [change, stopDrag])
@@ -463,46 +553,15 @@ export function PhotoPreview({
   }, [model.viewport.width, model.viewport.height, working?.width, working?.height])
 
   useEffect(() => {
-    if (suspended) return
-    const started = performance.now()
-    const draw = () => {
-      presenter.current?.setComparison(mode, split)
-      if (presenter.current instanceof HdrPresenter || presenter.current instanceof HdrCpuPresenter)
-        presenter.current.setHdrRanges(hdrRanges)
-      if (presenter.current instanceof HdrPresenter)
-        presenter.current.setEditing(gesturing, editingEpoch)
-      presenter.current?.draw(model.image, model.viewport, model.view, {
-        whiteBalance: adjustments.whiteBalance,
-        exposureEv: adjustments.exposureEv,
-        contrast: adjustments.contrast,
-        highlights: adjustments.highlights,
-        shadows: adjustments.shadows,
-        whites: adjustments.whites,
-        blacks: adjustments.blacks,
-      })
-      performance.measure('luma.preview.presentation', {
-        start: started,
-        detail: {
-          exposureEv: adjustments.exposureEv,
-          contrast: adjustments.contrast,
-          highlights: adjustments.highlights,
-          shadows: adjustments.shadows,
-          whites: adjustments.whites,
-          blacks: adjustments.blacks,
-          scale: model.view.scale,
-        },
-      })
-    }
-    // Submission begins immediately; GPU completion gates publication of each draft.
-    if (presenter.current instanceof HdrPresenter) {
-      draw()
-      return
-    }
-    const id = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(id)
+    if (suspended) cancel()
+    // Edit submission remains immediate; gestures use the shared animation-frame callback.
+    else if (presenter.current instanceof HdrPresenter) flush()
+    else schedule()
   }, [
     suspended,
-    model,
+    cancel,
+    flush,
+    schedule,
     adjustments.exposureEv,
     adjustments.contrast,
     adjustments.highlights,
@@ -518,72 +577,11 @@ export function PhotoPreview({
     generation,
     gesturing,
     editingEpoch,
+    mask,
+    shadows,
+    highlights,
+    hdrOverlay,
   ])
-
-  useEffect(() => {
-    const canvas = overlay.current,
-      context = canvas?.getContext('2d')
-    if (!canvas || !context) return
-    canvas.width = Math.max(1, Math.round(model.viewport.width))
-    canvas.height = Math.max(1, Math.round(model.viewport.height))
-    context.clearRect(0, 0, canvas.width, canvas.height)
-    if (!mask || !working) return
-    const { image, viewport, view } = model
-    let levelIndex = 0
-    while (levelIndex + 1 < mask.levels.length && view.scale * 2 ** levelIndex < 1) levelIndex++
-    const level = mask.levels[levelIndex]
-    const left = (viewport.width - image.width * view.scale) / 2 + view.x,
-      top = (viewport.height - image.height * view.scale) / 2 + view.y
-    const pixelWidth = (image.width * view.scale) / level.width,
-      pixelHeight = (image.height * view.scale) / level.height
-    const sx = Math.max(0, Math.floor(-left / pixelWidth)),
-      sy = Math.max(0, Math.floor(-top / pixelHeight))
-    const width = Math.max(
-      0,
-      Math.min(level.width, Math.ceil((viewport.width - left) / pixelWidth)) - sx,
-    )
-    const height = Math.max(
-      0,
-      Math.min(level.height, Math.ceil((viewport.height - top) / pixelHeight)) - sy,
-    )
-    if (!width || !height) return
-    const compact = document.createElement('canvas')
-    compact.width = width
-    compact.height = height
-    const pixels = new Uint8ClampedArray(width * height * 4)
-    for (let y = 0; y < height; y++)
-      for (let x = 0; x < width; x++) {
-        const bits = level.data[(sy + y) * level.width + sx + x],
-          i = (y * width + x) * 4
-        if (working.hdr && bits & hdrOverlay) {
-          pixels[i] = 255
-          pixels[i + 1] = 160
-          pixels[i + 3] = (x + y) % 4 < 2 ? 220 : 140
-        } else if (!working.hdr && highlights && bits & 2) {
-          pixels[i] = 255
-          pixels[i + 3] = 180
-        } else if (!working.hdr && shadows && bits & 1) {
-          pixels[i + 2] = 255
-          pixels[i + 3] = 180
-        }
-      }
-    compact.getContext('2d')!.putImageData(new ImageData(pixels, width, height), 0, 0)
-    context.save()
-    if (mode === 'split') {
-      context.beginPath()
-      context.rect(canvas.width * split, 0, canvas.width, canvas.height)
-      context.clip()
-    }
-    context.imageSmoothingEnabled = false
-    context.drawImage(
-      compact,
-      left + sx * pixelWidth,
-      top + sy * pixelHeight,
-      width * pixelWidth,
-      height * pixelHeight,
-    )
-    context.restore()
-  }, [mask, model, mode, split, shadows, highlights, working, hdrOverlay])
 
   function fit() {
     stopDrag()
